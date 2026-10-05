@@ -900,6 +900,7 @@
                         LoginError: {
                             Title: '登录错误',
                             Message: '登录发生错误：{Info}',
+                            UnknownResponse: '服务器返回了未知结果',
                             Ok: '确定',
                         },
                         AccountSwitched: {
@@ -1741,6 +1742,7 @@
                         LoginError: {
                             Title: '登入錯誤',
                             Message: '登入發生錯誤：{Info}',
+                            UnknownResponse: '伺服器回傳了未知結果',
                             Ok: '確定',
                         },
                         AccountSwitched: {
@@ -2376,7 +2378,8 @@
                  * @returns {Promise<string>}
                  */
                 function requestText(detail) {
-                    const { promise, resolve } = Promise.withResolvers();
+                    const { promise, resolve, reject } = Promise.withResolvers();
+                    const { onerror, onabort, ontimeout } = detail;
                     detail.responseType = 'arraybuffer';
                     detail.onload = response => {
                         const buffer = (response.response);
@@ -2384,8 +2387,25 @@
                         const text = decoder.decode(buffer);
                         resolve(text);
                     };
+                    detail.onerror = rejectWithCallback(onerror);
+                    detail.onabort = rejectWithCallback(onabort);
+                    detail.ontimeout = rejectWithCallback(ontimeout);
                     GM_xmlhttpRequest(detail);
                     return promise;
+
+                    /**
+                     * 先执行原有错误回调，再将请求错误传递给Promise
+                     * @param {function | undefined} callback
+                     */
+                    function rejectWithCallback(callback) {
+                        return function rejectRequest(error) {
+                            try {
+                                callback?.call(this, error);
+                            } finally {
+                                reject(error);
+                            }
+                        };
+                    }
                 }
 
                 /**
@@ -8102,12 +8122,11 @@
                                                 utils.requestDocument({
                                                     method: 'GET',
                                                     url: `/modules/article/reviewshow.php?rid=${rid}&page=${page ?? 1}`,
-                                                    onerror: onError,
                                                 }).then(doc => {
                                                     const floors = parser.parseAll(doc);
                                                     const pagelink = $(doc, '#pagelink');
                                                     resolve({ floors, pagelink });
-                                                });
+                                                }).catch(onError);
                                             } catch(err) {
                                                 onError(err);
                                             }
@@ -20962,7 +20981,7 @@
 
                 // 文库使用cookie `PHPSESSID` 作为登录凭据，但脚本不保存和处理此值，因为此值随时可能因用户点击退出登录、超时等原因失效而脚本无法得知
                 // 脚本仅保存帐号和密码（如果用户勾选了保存密码），每次切换帐号时主动退出当前帐号并重新登录
-                // 脚本登录时，同时登录api和网页端
+                // 脚本以网页端登录结果为准，登录成功后尝试同步api登录状态
                 /**
                  * @typedef {Object} Account
                  * @property {string} username - 用户名
@@ -21244,11 +21263,11 @@
                                     // 切换帐号逻辑
                                     async doSwitch() {
                                         // 1. UI置于"加载中"状态
-                                        // 2. 如果已有登录帐号，先登出已有帐号（同时对网页端和api都登出）
-                                        // 3. api登录新帐号
-                                        // 4. 如果上一步api登录失败，则报错终止帐号切换逻辑，恢复UI空闲状态
-                                        // 5. 如果api登录成功，则继续登录网页端
-                                        // 6. 保存帐号信息；如果用户勾选了"记住密码"，同时保存密码
+                                        // 2. 登出网页端当前帐号
+                                        // 3. 使用网页端登录表单尝试登录新帐号
+                                        // 4. 如果网页端登录失败，则显示服务器错误并终止帐号切换
+                                        // 5. 保存帐号信息；如果用户勾选了"记住密码"，同时保存密码
+                                        // 6. 尝试同步api登录状态，最多等待3秒
                                         // 7. Notify提示登录完成，并允许查看登录结果
                                         // 8. UI恢复空闲状态
 
@@ -21257,90 +21276,78 @@
                                         // UI置于"加载中"状态
                                         that.loading = true;
 
-                                        // 登出
-                                        // 不用管是否已登录帐号，无脑执行登出就好了
-                                        /** @type {boolean} API调用是否存在错误，如果存在错误，后续应跳过API步骤直接登录网页端 */
-                                        let api_error = false;
-                                        await Promise.all([
+                                        try {
                                             // 登出网页端
-                                            utils.requestDocument({
+                                            // 不用管是否已登录帐号，无脑执行登出就好了
+                                            await utils.requestDocument({
                                                 method: 'GET',
                                                 url: '/logout.php',
-                                            }),
-                                            // 登出api
-                                            api.logout().catch(err => api_error = true),
-                                        ]);
-
-                                        // api登录
-                                        const username = that.username;
-                                        const password = that.password;
-                                        const is_email = that.username.includes('@');
-                                        const api_login_result = api_error ? -1 : parseInt(await api.login(username, password, is_email), 10);
-
-                                        // api登录失败则终止切换帐号逻辑
-                                        if (!api_error && api_login_result !== 1) {
-                                            const LoginError = UI.LoginError;
-                                            const error_info = api.getErrorInfo(api_login_result);
-                                            Quasar.Dialog.create({
-                                                title: LoginError.Title,
-                                                message: replaceText(
-                                                    LoginError.Message,
-                                                    { '{Info}': error_info }
-                                                ),
-                                                ok: {
-                                                    label: LoginError.Ok,
-                                                    color: 'primary',
-                                                    flat: true,
-                                                },
+                                                timeout: 15 * 1000,
                                             });
-                                            that.loading = false;
-                                            return;
-                                        }
 
-                                        // 网页登录
-                                        const formdata = new FormData();
-                                        formdata.set('username', username);
-                                        formdata.set('password', password);
-                                        formdata.set('usecookie', 315360000); // 保存一年
-                                        formdata.set('action', 'login');
-                                        //formdata.set('submit', '%26%23160%3B%B5%C7%26%23160%3B%26%23160%3B%C2%BC%26%23160%3B'); // &#160;登&#160;&#160;录&#160;
-                                        const doc = await utils.requestDocument({
-                                            method: 'POST',
-                                            url: '/login.php?do=submit',
-                                            data: utils.serializeFormData(formdata),
-                                            headers: {
-                                                'content-type': 'application/x-www-form-urlencoded'
-                                            },
-                                        });
+                                            // 网页登录
+                                            const username = that.username;
+                                            const password = that.password;
+                                            const is_email = username.includes('@');
+                                            const jumpurl = `http://${ location.host }/index.php`;
+                                            const formdata = new FormData();
+                                            formdata.set('username', username);
+                                            formdata.set('password', password);
+                                            formdata.set('usecookie', 315360000); // 保存一年
+                                            formdata.set('action', 'login');
+                                            formdata.set('submit', '&#160;登&#160;&#160;录&#160;');
+                                            const doc = await utils.requestDocument({
+                                                method: 'POST',
+                                                url: `/login.php?do=submit&jumpurl=${ encodeURIComponent(jumpurl) }`,
+                                                data: utils.serializeFormData(formdata),
+                                                headers: {
+                                                    'content-type': 'application/x-www-form-urlencoded'
+                                                },
+                                                timeout: 15 * 1000,
+                                            });
 
-                                        // 获取昵称，保存帐号信息
-                                        if (!api_error) {
-                                            const userinfo = await api.getUserInfo();
-                                            const nickname = $(userinfo, '[name="nickname"]').firstChild.nodeValue;
+                                            // 检查网页端登录结果
+                                            const block_title = $(doc, '.blocktitle')?.innerText.trim() || doc.title.trim();
+                                            const block_content = $(doc, '.blockcontent')?.innerText.trim() || '';
+                                            if (!['登录成功', '登入成功'].includes(block_title)) {
+                                                showLoginError(block_content || block_title || UI.LoginError.UnknownResponse);
+                                                return;
+                                            }
+
+                                            // 保存帐号信息
                                             /** @type {Account[]} */
                                             const accounts = GM_getValue('accounts');
                                             let account = accounts.find(acc => acc.username === username);
                                             if (account) {
                                                 account.password = that.save_password ? password : null;
-                                                account.nickname = nickname;
                                             } else {
+                                                const nickname = block_content.match(/^\s*(.+?)[，,]\s*(?:欢迎您到来|歡迎您到來)/m)?.[1]?.trim() || username;
                                                 account = { username, nickname };
                                                 account.password = that.save_password ? password : null;
                                                 accounts.push(account);
                                             }
                                             GM_setValue('accounts', accounts);
-                                        }
 
-                                        // Notify提示切换帐号完成
-                                        Quasar.Notify.create({
-                                            type: 'success',
-                                            message: UI.AccountSwitched.Message,
-                                            caption: $(doc, '.blocktitle').innerText,
-                                            actions: [{
+                                            // 尝试同步api登录状态，请求结果不影响网页端登录
+                                            const api_sync = api.logout()
+                                                .then(() => api.login(username, password, is_email))
+                                                .catch(() => {});
+                                            await Promise.race([
+                                                api_sync,
+                                                new Promise(resolve => setTimeout(resolve, 3 * 1000)),
+                                            ]);
+
+                                            // Notify提示切换帐号完成
+                                            const actions = [{
+                                                label: UI.AccountSwitched.Reload,
+                                                handler: () => location.reload(),
+                                            }];
+                                            const response_block = $(doc, '.block');
+                                            response_block && actions.unshift({
                                                 label: UI.AccountSwitched.ShowDetails,
                                                 async handler() {
                                                     // 使用文库返回的block作为详情弹窗内容
-                                                    const block = $(doc, '.block').cloneNode(true);
+                                                    const block = response_block.cloneNode(true);
                                                     block.classList.add('plus-preserve-border');
                                                     // 移除脚注
                                                     $(block, '.blocknote')?.remove();
@@ -21364,7 +21371,7 @@
                                                             dialog.hide();
                                                         }, { capture: true })
                                                     );
-                                                    
+
                                                     // Quasar Dialog 展示详情
                                                     const dialog = Quasar.Dialog.create({
                                                         message: '<div id="plus-accountswitch-detail"></div>',
@@ -21377,18 +21384,39 @@
                                                     });
                                                     (await detectDom('#plus-accountswitch-detail')).append(block);
                                                 }
-                                            }, {
-                                                label: UI.AccountSwitched.Reload,
-                                                handler: () => location.reload(),
-                                            }],
-                                            group: 'accountswitch.gui.switched',
-                                        });
+                                            });
+                                            Quasar.Notify.create({
+                                                type: 'success',
+                                                message: UI.AccountSwitched.Message,
+                                                caption: block_title,
+                                                actions,
+                                                group: 'accountswitch.gui.switched',
+                                            });
 
-                                        // 当开启自动刷新时，刷新页面
-                                        GM_getValue('auto_reload') && location.reload();
+                                            // 当开启自动刷新时，刷新页面
+                                            GM_getValue('auto_reload') && location.reload();
+                                        } catch (err) {
+                                            showLoginError(err?.message || UI.LoginError.UnknownResponse);
+                                        } finally {
+                                            // UI恢复空闲状态
+                                            that.loading = false;
+                                        }
 
-                                        // UI恢复空闲状态
-                                        that.loading = false;
+                                        function showLoginError(info) {
+                                            const LoginError = UI.LoginError;
+                                            Quasar.Dialog.create({
+                                                title: LoginError.Title,
+                                                message: replaceText(
+                                                    LoginError.Message,
+                                                    { '{Info}': info }
+                                                ),
+                                                ok: {
+                                                    label: LoginError.Ok,
+                                                    color: 'primary',
+                                                    flat: true,
+                                                },
+                                            });
+                                        }
                                     },
 
                                     /**
