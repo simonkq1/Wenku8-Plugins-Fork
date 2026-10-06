@@ -2382,6 +2382,16 @@
                     const { onerror, onabort, ontimeout } = detail;
                     detail.responseType = 'arraybuffer';
                     detail.onload = response => {
+                        if (response.status < 200 || response.status >= 300) {
+                            const url = response.finalUrl || detail.url;
+                            const status = `HTTP ${response.status} ${response.statusText ?? ''}`.trim();
+                            const error = new Error(`${status}: ${url}`);
+                            error.name = 'HTTPError';
+                            error.status = response.status;
+                            error.url = url;
+                            reject(error);
+                            return;
+                        }
                         const buffer = (response.response);
                         const decoder = new TextDecoder(document.characterSet);
                         const text = decoder.decode(buffer);
@@ -8123,8 +8133,24 @@
                                                     method: 'GET',
                                                     url: `/modules/article/reviewshow.php?rid=${rid}&page=${page ?? 1}`,
                                                 }).then(doc => {
-                                                    const floors = parser.parseAll(doc);
-                                                    const pagelink = $(doc, '#pagelink');
+                                                    let floors;
+                                                    let pagelink;
+                                                    try {
+                                                        floors = parser.parseAll(doc);
+                                                        pagelink = $(doc, '#pagelink');
+                                                    } catch (err) {
+                                                        const error = new Error('Invalid review page response');
+                                                        error.name = 'InvalidReviewPageError';
+                                                        error.cause = err;
+                                                        reject(error);
+                                                        return;
+                                                    }
+                                                    if (!floors.length || !pagelink) {
+                                                        const error = new Error('Invalid review page response');
+                                                        error.name = 'InvalidReviewPageError';
+                                                        reject(error);
+                                                        return;
+                                                    }
                                                     resolve({ floors, pagelink });
                                                 }).catch(onError);
                                             } catch(err) {
@@ -8136,6 +8162,10 @@
                                             async function onError(err) {
                                                 /** @type {logger} */
                                                 const logger = await require('logger', true);
+                                                if (err?.name === 'HTTPError' || err?.name === 'InvalidReviewPageError') {
+                                                    reject(err);
+                                                    return;
+                                                }
                                                 if (retry-- > 0) {
                                                     logger.warn('Warn', 'review.FloorManager.updater.fetch: Retrying...');
                                                     await fetch(rid, page, retry).then(result => resolve(result)).catch(err => reject(err));
@@ -8566,7 +8596,7 @@
                                 e.preventDefault();
                                 const search = new URLSearchParams(a.search);
                                 const page = parseInt(search.get('page'), 10);
-                                FloorManager.updater.update('loading', page, false, 'push');
+                                FloorManager.updater.update('loading', page, false, 'push').catch(() => location.assign(a.href));
                             });
 
                             // 注册设置项
@@ -8621,9 +8651,16 @@
                                 if (same_review) {
                                     // 页面更新
                                     const page = parseInt(new_url.searchParams.get('page') ?? '0', 10);
-                                    pagejump.enabled ?
-                                        await FloorManager.updater.update('loading', page, false, 'none') :
+                                    if (pagejump.enabled) {
+                                        try {
+                                            await FloorManager.updater.update('loading', page, false, 'none');
+                                        } catch (err) {
+                                            location.reload();
+                                            return;
+                                        }
+                                    } else {
                                         location.reload();
+                                    }
                                     
                                     // 楼层跳转
                                     const str_yid = new_url.hash.match(/\d+/)?.[0];
@@ -8779,7 +8816,7 @@
 
                                     // 更新页面楼层
                                     const page = to_last ? 'last' : new URLSearchParams(location.search).get('page') ?? 1;
-                                    await FloorManager.updater.update('loading', page, true, 'push');
+                                    await FloorManager.updater.update('loading', page, true, 'push').catch(() => {});
                                 });
                             }
 
@@ -9023,7 +9060,7 @@
                                 // 未启用自动刷新时，setTimeout自循环依然执行，以备用户修改启用状态时可以即刻投入执行
                                 if (GM_getValue('enabled')  && document.visibilityState === 'visible') {
                                     const page = GM_getValue('refresh_last') ? 'last' : null;
-                                    FloorManager.updater.update('notify', page, true, 'replace');
+                                    FloorManager.updater.update('notify', page, true, 'replace').catch(() => {});
                                 }
 
                                 // 规划下一次刷新
@@ -18611,19 +18648,53 @@
                                         const check_interval = GM_getValue('check_interval');
                                         const check_interval_ms = check_interval * 60 * 60 * 1000;
                                         const check_interval_inpage = Math.max(CONST.Internal.ReviewUpdateMinCheckInterval, check_interval_ms);
+                                        const check_backoff_ms = 10 * 60 * 1000;
+                                        let checking = false;
+                                        let backoff_timer = null;
 
                                         if (check_interval < 0) { return; }
 
                                         // 打开页面时，自动检查一次
-                                        doCheck();
+                                        runCheck();
                                         // 在页面内，每过一段时间自动检查一次
                                         // 即使设置了极短的检查间隔，这段时间间隔不能短于一定最短长度，防止快速产生大量请求
                                         // 如需快速即时检查是否有更新，可以打开书评最后一页，利用页面自动更新检查；或手动刷新页面
-                                        setInterval(doCheck, check_interval_inpage);
+                                        setInterval(runCheck, check_interval_inpage);
+
+                                        async function runCheck() {
+                                            if (!GM_getValue('enabled') || checking) { return; }
+
+                                            const backoff_until = GM_getValue('check_backoff_until', 0);
+                                            if (backoff_until > Date.now()) {
+                                                scheduleCheck(backoff_until);
+                                                return;
+                                            }
+
+                                            checking = true;
+                                            try {
+                                                await doCheck();
+                                                GM_setValue('check_backoff_until', 0);
+                                            } catch (err) {
+                                                const next_check = Date.now() + check_backoff_ms;
+                                                GM_setValue('check_backoff_until', next_check);
+                                                scheduleCheck(next_check);
+                                                logger.warn('Warn', 'reviewcollection.checker.newfloor: Check failed, backing off', err);
+                                            } finally {
+                                                checking = false;
+                                            }
+                                        }
+
+                                        function scheduleCheck(time) {
+                                            clearTimeout(backoff_timer);
+                                            backoff_timer = setTimeout(() => {
+                                                backoff_timer = null;
+                                                runCheck();
+                                            }, Math.max(0, time - Date.now()));
+                                        }
 
                                         async function doCheck() {
                                             /** @type {Collection[]} */
-                                            const collections = core.listCollections();
+                                            const collections = structuredClone(core.listCollections());
                                             const now = Date.now();
                                             
                                             let modified = false;
@@ -18662,12 +18733,18 @@
                                         const rid = parseInt(new URLSearchParams(location.search).get('rid'), 10);
 
                                         // 立即记录
-                                        doRecord();
+                                        runRecord();
                                         // 当页面书评楼层更新时记录
                                         require('review', true).then(
                                             /** @param {review} review */
-                                            review => $AEL(review.messager, 'update', e => doRecord())
+                                            review => $AEL(review.messager, 'update', e => runRecord())
                                         );
+
+                                        function runRecord() {
+                                            doRecord().catch(err =>
+                                                logger.warn('Warn', 'reviewcollection.checker.record: Record failed', err)
+                                            );
+                                        }
 
                                         async function doRecord() {
                                             // 获取全部收藏夹中的所有当前页面书评的收藏项
@@ -18757,7 +18834,13 @@
                                 /** @type {HTMLAnchorElement[]} */
                                 const links = $All(doc, '#content > table > tbody > tr > td:last-of-type > div:nth-of-type(2) > a[href^="#yid"]');
                                 const last = links[links.length-1];
-                                const number = parseInt(last.innerText.match(/\d+/)[0], 10);
+                                const match = last?.innerText?.match(/\d+/);
+                                const number = parseInt(match?.[0], 10);
+                                if (!last || !match || !Number.isFinite(number)) {
+                                    const error = new Error('Invalid review floor response');
+                                    error.name = 'InvalidReviewPageError';
+                                    throw error;
+                                }
                                 return number;
                             }
 
@@ -21607,6 +21690,13 @@
             },
         }
     };
-    default_pool.catch_errors = true;
-    loadFuncs(functions);
+    const is_cloudflare_challenge =
+        location.pathname.startsWith('/cdn-cgi/') ||
+        !!window._cf_chl_opt ||
+        (typeof unsafeWindow !== 'undefined' && !!unsafeWindow._cf_chl_opt) ||
+        !!document.querySelector('#challenge-running, #cf-challenge-running, #challenge-stage, form#challenge-form');
+    if (!is_cloudflare_challenge) {
+        default_pool.catch_errors = true;
+        loadFuncs(functions);
+    }
 }) ();
