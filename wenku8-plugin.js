@@ -339,6 +339,9 @@
                         Refreshed: '书架已刷新',
                         Removed: '已移出书架',
                         ActionFinished: '已{ActionName}',
+                        LoadError: '书架加载失败',
+                        LoadErrorCaption: '请检查网络后重试，当前书架内容已保留',
+                        RateLimitedCaption: '请求过于频繁，当前书架内容已保留，请稍后重试',
                         NoBooksSelected: '请先选择要操作的书目！',
                         Dialog: {
                             ConfirmRemove: {
@@ -1167,6 +1170,9 @@
                         Refreshed: '書架已重新整理',
                         Removed: '已移出書架',
                         ActionFinished: '已{ActionName}',
+                        LoadError: '書架載入失敗',
+                        LoadErrorCaption: '請檢查網路後重試，目前書架內容已保留',
+                        RateLimitedCaption: '請求過於頻繁，目前書架內容已保留，請稍後再試',
                         NoBooksSelected: '請先選擇要操作的書目！',
                         Dialog: {
                             ConfirmRemove: {
@@ -12718,14 +12724,26 @@
                         },
                         /** @typedef {Awaited<ReturnType<typeof pool_funcs.collector.func>>} collector */
                         async func() {
+                            const fetch_interval = 500;
+                            const retry_delays = [2000, 5000];
+                            let last_fetch_time = 0;
+
                             // 获取所有书架页面
                             Quasar.Loading.show({ message: CONST.Text.Bookcase.Collector.FetchingBookcases });
                             let page_classid = parseInt(new URLSearchParams(location.search).get('classid') ?? '0', 10);
-                            const forms = await Promise.all([0, 1, 2, 3, 4, 5].map(async classid => {
-                                return classid === page_classid ?
-                                    await detectDom('#checkform') :
-                                    await fetchBookcase(classid);
-                            }));
+                            const forms = [];
+                            try {
+                                for (const classid of [0, 1, 2, 3, 4, 5]) {
+                                    forms[classid] = classid === page_classid ?
+                                        await detectDom('#checkform') :
+                                        await fetchBookcase(classid);
+                                }
+                            } catch (err) {
+                                notifyBookcaseError(err);
+                                return { available: false };
+                            } finally {
+                                Quasar.Loading.hide();
+                            }
 
                             // 切换书架功能
                             Quasar.Loading.show({ message: CONST.Text.Bookcase.Collector.ArrangingBookcases });
@@ -12766,13 +12784,22 @@
                             /** @type {([classid]: number, [new_form]: HTMLFormElement) => Promise<void>} */
                             const updateBookcase = async (classid=null, new_form=null) => {
                                 Quasar.Loading.show({ message: CONST.Text.Bookcase.Collector.UpdatingBookcase });
+                                try {
+                                    // 如果不提供classid，则依序更新所有书架
+                                    if (classid === null) {
+                                        for (let classid = 0; classid < forms.length; classid++) {
+                                            await updateSingleBookcase(classid);
+                                        }
+                                        return;
+                                    }
 
-                                // 如果不提供classid，则更新所有书架
-                                if (classid === null) {
-                                    await Promise.all(forms.map(async (form, classid) => updateBookcase(classid)));
-                                    return;
+                                    await updateSingleBookcase(classid, new_form);
+                                } finally {
+                                    Quasar.Loading.hide();
                                 }
+                            };
 
+                            async function updateSingleBookcase(classid, new_form=null) {
                                 // 获取新书架
                                 const form = forms[classid];
                                 new_form = new_form ?? await fetchBookcase(classid);
@@ -12790,9 +12817,7 @@
                                         classid,
                                     }
                                 }));
-
-                                Quasar.Loading.hide();
-                            };
+                            }
                             const convertActionsInpage = (form, classid) => {
                                 // 表单提交改为ajax提交
                                 $AEL(form, 'submit', async e => {
@@ -12815,35 +12840,41 @@
                                     // ajax提交表单
                                     Quasar.Loading.show({ message: CONST.Text.Bookcase.Collector.SubmitingChange });
                                     const formdata = new FormData(form);
-                                    const doc = await utils.requestDocument({
-                                        method: 'POST',
-                                        url: `/modules/article/bookcase.php?classid=${page_classid}&ajax_gets=jieqi_contents`,
-                                        data: utils.serializeFormData(formdata),
-                                        headers: {
-                                            'content-type': 'application/x-www-form-urlencoded',
-                                            'referrer': location.href,
-                                        },
-                                    });
-                                    const new_form = $(doc, '#checkform');
-                                    Quasar.Loading.hide();
+                                    const url = `/modules/article/bookcase.php?classid=${page_classid}&ajax_gets=jieqi_contents`;
+                                    try {
+                                        const doc = await utils.requestDocument({
+                                            method: 'POST',
+                                            url,
+                                            data: utils.serializeFormData(formdata),
+                                            headers: {
+                                                'content-type': 'application/x-www-form-urlencoded',
+                                                'referrer': location.href,
+                                            },
+                                        });
+                                        const new_form = getBookcaseForm(doc, url);
 
-                                    // 更新书架
-                                    await Promise.all([
                                         // 更新当前书架
-                                        updateBookcase(classid, new_form),
-                                        // 如果有，更新相关书架
-                                        formdata.get('newclassid') ? updateBookcase(parseInt(formdata.get('newclassid'))) : Promise.resolve()
-                                    ]);
+                                        await updateSingleBookcase(classid, new_form);
+                                        // 移动书籍时，更新目标书架
+                                        const new_classid = parseInt(formdata.get('newclassid'), 10);
+                                        if (new_classid >= 0 && new_classid !== classid) {
+                                            await updateSingleBookcase(new_classid);
+                                        }
 
-                                    // 提示完成
-                                    Quasar.Notify.create({
-                                        type: 'success',
-                                        message: replaceText(
-                                            CONST.Text.Bookcase.Collector.ActionFinished,
-                                            { '{ActionName}': action_name }
-                                        ),
-                                        group: 'bookcase.moved'
-                                    });
+                                        // 提示完成
+                                        Quasar.Notify.create({
+                                            type: 'success',
+                                            message: replaceText(
+                                                CONST.Text.Bookcase.Collector.ActionFinished,
+                                                { '{ActionName}': action_name }
+                                            ),
+                                            group: 'bookcase.moved'
+                                        });
+                                    } catch (err) {
+                                        notifyBookcaseError(err);
+                                    } finally {
+                                        Quasar.Loading.hide();
+                                    }
                                 }, { capture: true });
 
                                 // 移除书籍按钮改为ajax提交
@@ -12853,18 +12884,23 @@
                                     const bookname = a.closest('tr').children[1].querySelector('a').innerText.trim();
                                     
                                     if (!await confirmRemove(bookname)) { return; }
-                                    const doc = await utils.requestDocument({
-                                        method: 'GET',
-                                        url: `/modules/article/bookcase.php?classid=${classid}&ajax_gets=jieqi_contents&ajax_request=${Date.now()}&delid=${bid}`,
-                                    });
-                                    const new_form = $(doc, '#checkform');
-                                    updateBookcase(classid, new_form);
-                                    Quasar.Notify.create({
-                                        type: 'success',
-                                        message: CONST.Text.Bookcase.Collector.Removed,
-                                        caption: bookname,
-                                        group: 'bookcase.book-removed',
-                                    });
+                                    Quasar.Loading.show({ message: CONST.Text.Bookcase.Collector.UpdatingBookcase });
+                                    const url = `/modules/article/bookcase.php?classid=${classid}&ajax_gets=jieqi_contents&ajax_request=${Date.now()}&delid=${bid}`;
+                                    try {
+                                        const doc = await utils.requestDocument({ method: 'GET', url });
+                                        const new_form = getBookcaseForm(doc, url);
+                                        await updateSingleBookcase(classid, new_form);
+                                        Quasar.Notify.create({
+                                            type: 'success',
+                                            message: CONST.Text.Bookcase.Collector.Removed,
+                                            caption: bookname,
+                                            group: 'bookcase.book-removed',
+                                        });
+                                    } catch (err) {
+                                        notifyBookcaseError(err);
+                                    } finally {
+                                        Quasar.Loading.hide();
+                                    }
                                 }));
 
                                 /**
@@ -12908,12 +12944,16 @@
                                     label: CONST.Text.Bookcase.Collector.RefreshBookcase,
                                     index: 2,
                                     async callback() {
-                                        await updateBookcase();
-                                        Quasar.Notify.create({
-                                            type: 'success',
-                                            message: CONST.Text.Bookcase.Collector.Refreshed,
-                                            group: 'bookcase.bookcase-refreshed',
-                                        });
+                                        try {
+                                            await updateBookcase();
+                                            Quasar.Notify.create({
+                                                type: 'success',
+                                                message: CONST.Text.Bookcase.Collector.Refreshed,
+                                                group: 'bookcase.bookcase-refreshed',
+                                            });
+                                        } catch (err) {
+                                            notifyBookcaseError(err);
+                                        }
                                     },
                                 })
                             );
@@ -12952,14 +12992,59 @@
                             /**
                              * 网络请求获取指定书架form元素
                              * @param {number} classid
+                             * @param {number} [retry=0]
                              * @returns {Promise<HTMLFormElement>} 
                              */
-                            async function fetchBookcase(classid) {
-                                const doc = await utils.requestDocument({
-                                    method: 'GET',
-                                    url: `/modules/article/bookcase.php?classid=${classid}&ajax_gets=jieqi_contents&ajax_request=${Date.now()}`,
+                            async function fetchBookcase(classid, retry=0) {
+                                await waitForFetchSlot();
+                                const url = `/modules/article/bookcase.php?classid=${classid}&ajax_gets=jieqi_contents&ajax_request=${Date.now()}`;
+                                try {
+                                    const doc = await utils.requestDocument({ method: 'GET', url });
+                                    return getBookcaseForm(doc, url);
+                                } catch (err) {
+                                    if (err?.name === 'HTTPError' && err.status === 429 && retry < retry_delays.length) {
+                                        await delay(retry_delays[retry]);
+                                        return fetchBookcase(classid, retry + 1);
+                                    }
+                                    throw err;
+                                }
+                            }
+
+                            async function waitForFetchSlot() {
+                                const wait = fetch_interval - (Date.now() - last_fetch_time);
+                                if (wait > 0) { await delay(wait); }
+                                last_fetch_time = Date.now();
+                            }
+
+                            function delay(time) {
+                                return new Promise(resolve => setTimeout(resolve, time));
+                            }
+
+                            /**
+                             * 从书架页面响应中获取form，拒绝错误页或验证页
+                             * @param {Document} doc
+                             * @param {string} url
+                             * @returns {HTMLFormElement}
+                             */
+                            function getBookcaseForm(doc, url) {
+                                const form = $(doc, '#checkform');
+                                if (form) { return form; }
+
+                                const error = new Error(`Invalid bookcase page response: ${url}`);
+                                error.name = 'InvalidBookcasePageError';
+                                error.url = url;
+                                throw error;
+                            }
+
+                            function notifyBookcaseError(err) {
+                                const Collector = CONST.Text.Bookcase.Collector;
+                                const rate_limited = err?.name === 'HTTPError' && err.status === 429;
+                                Quasar.Notify.create({
+                                    type: 'error',
+                                    message: Collector.LoadError,
+                                    caption: rate_limited ? Collector.RateLimitedCaption : Collector.LoadErrorCaption,
+                                    group: 'bookcase.load-error',
                                 });
-                                return $(doc, '#checkform');
                             }
 
                             /**
@@ -12972,6 +13057,7 @@
                             }
                             
                             return {
+                                available: true,
                                 // 数据
                                 forms,
                                 get classid() { return page_classid; },
@@ -12996,6 +13082,7 @@
                         async func(GM_setValue, GM_getValue, GM_addValueChangeListener) {
                             /** @type {collector} */
                             const collector = pool.require('collector');
+                            if (!collector?.available) { return; }
 
                             const default_names = [
                                 '默认书架',
