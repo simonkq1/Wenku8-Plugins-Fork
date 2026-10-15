@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name               轻小说文库+
 // @namespace          https://greasyfork.org/users/667968-pyudng
-// @version            2.31.2
+// @version            2.31.3
 // @description        轻小说文库全方位体验改善，涵盖阅读、下载、书架、推荐、书评、账号、页面个性化等各种方面，你能想到的这里都有。没有？欢迎提出你的点子。
 // @author             PY-DNG
 // @license            GPL-3.0-or-later
@@ -904,6 +904,9 @@
                             Title: '登录错误',
                             Message: '登录发生错误：{Info}',
                             UnknownResponse: '服务器返回了未知结果',
+                            PopupBlocked: '登录窗口被浏览器拦截，请允许本站打开弹出窗口后重试',
+                            WindowClosed: '登录窗口已关闭，帐号切换已取消',
+                            Timeout: '登录操作已超时，请重试',
                             Ok: '确定',
                         },
                         AccountSwitched: {
@@ -1749,6 +1752,9 @@
                             Title: '登入錯誤',
                             Message: '登入發生錯誤：{Info}',
                             UnknownResponse: '伺服器回傳了未知結果',
+                            PopupBlocked: '登入視窗被瀏覽器阻擋，請允許本站開啟彈出視窗後重試',
+                            WindowClosed: '登入視窗已關閉，帳號切換已取消',
+                            Timeout: '登入操作已逾時，請重試',
                             Ok: '確定',
                         },
                         AccountSwitched: {
@@ -21432,9 +21438,9 @@
 
                                     // 切换帐号逻辑
                                     async doSwitch() {
-                                        // 1. UI置于"加载中"状态
-                                        // 2. 登出网页端当前帐号
-                                        // 3. 使用网页端登录表单尝试登录新帐号
+                                        // 1. 打开同源顶层窗口，使用网页原生导航登出当前帐号
+                                        // 2. 向登录窗口提交网页原生登录表单
+                                        // 3. 等待网页登录结果或用户完成Cloudflare验证
                                         // 4. 如果网页端登录失败，则显示服务器错误并终止帐号切换
                                         // 5. 保存帐号信息；如果用户勾选了"记住密码"，同时保存密码
                                         // 6. 尝试同步api登录状态，最多等待3秒
@@ -21442,58 +21448,67 @@
                                         // 8. UI恢复空闲状态
 
                                         const that = this;
+                                        const username = that.username;
+                                        const password = that.password;
+                                        const save_password = that.save_password;
+                                        const is_email = username.includes('@');
+                                        const login_window_name = 'wenku8-plus-accountswitch-login';
+                                        let login_window;
+
+                                        // window.open必须直接由点击事件触发，否则会被浏览器拦截
+                                        try {
+                                            login_window = window.open(
+                                                '',
+                                                login_window_name,
+                                                'popup=yes,width=520,height=640,resizable=yes,scrollbars=yes'
+                                            );
+                                        } catch (_) {}
+                                        if (!login_window || login_window.closed) {
+                                            showLoginError(UI.LoginError.PopupBlocked);
+                                            return;
+                                        }
 
                                         // UI置于"加载中"状态
                                         that.loading = true;
 
                                         try {
-                                            // 登出网页端
-                                            // 不用管是否已登录帐号，无脑执行登出就好了
-                                            await utils.requestDocument({
-                                                method: 'GET',
-                                                url: '/logout.php',
-                                                timeout: 15 * 1000,
-                                            });
+                                            const deadline = Date.now() + 3 * 60 * 1000;
+                                            login_window.focus();
+                                            const initial_document = readLoginWindow(login_window)?.doc;
+                                            login_window.location = new URL('/logout.php', location.href).href;
+                                            const logout_document =
+                                                await waitForLogout(login_window, deadline, initial_document);
+                                            const allow_cookie_fallback = !utils.isLoggedIn();
 
-                                            // 网页登录
-                                            const username = that.username;
-                                            const password = that.password;
-                                            const is_email = username.includes('@');
+                                            // 网页原生表单登录
                                             const jumpurl = `http://${ location.host }/index.php`;
-                                            const formdata = new FormData();
-                                            formdata.set('username', username);
-                                            formdata.set('password', password);
-                                            formdata.set('usecookie', 315360000); // 保存一年
-                                            formdata.set('action', 'login');
-                                            formdata.set('submit', '&#160;登&#160;&#160;录&#160;');
-                                            const doc = await utils.requestDocument({
-                                                method: 'POST',
-                                                url: `/login.php?do=submit&jumpurl=${ encodeURIComponent(jumpurl) }`,
-                                                data: utils.serializeFormData(formdata),
-                                                headers: {
-                                                    'content-type': 'application/x-www-form-urlencoded'
-                                                },
-                                                timeout: 15 * 1000,
-                                            });
-
-                                            // 检查网页端登录结果
-                                            const block_title = $(doc, '.blocktitle')?.innerText.trim() || doc.title.trim();
-                                            const block_content = $(doc, '.blockcontent')?.innerText.trim() || '';
-                                            if (!['登录成功', '登入成功'].includes(block_title)) {
-                                                showLoginError(block_content || block_title || UI.LoginError.UnknownResponse);
-                                                return;
-                                            }
+                                            submitLogin(login_window_name, {
+                                                username,
+                                                password,
+                                                usecookie: 315360000, // 保存一年
+                                                action: 'login',
+                                                submit: '&#160;登&#160;&#160;录&#160;',
+                                            }, jumpurl);
+                                            const { block_title, block_content, response_block } =
+                                                await waitForLogin(
+                                                    login_window,
+                                                    deadline,
+                                                    logout_document,
+                                                    allow_cookie_fallback
+                                                );
+                                            closeLoginWindow(login_window);
+                                            login_window = null;
 
                                             // 保存帐号信息
                                             /** @type {Account[]} */
                                             const accounts = GM_getValue('accounts');
                                             let account = accounts.find(acc => acc.username === username);
                                             if (account) {
-                                                account.password = that.save_password ? password : null;
+                                                account.password = save_password ? password : null;
                                             } else {
                                                 const nickname = block_content.match(/^\s*(.+?)[，,]\s*(?:欢迎您到来|歡迎您到來)/m)?.[1]?.trim() || username;
                                                 account = { username, nickname };
-                                                account.password = that.save_password ? password : null;
+                                                account.password = save_password ? password : null;
                                                 accounts.push(account);
                                             }
                                             GM_setValue('accounts', accounts);
@@ -21512,7 +21527,6 @@
                                                 label: UI.AccountSwitched.Reload,
                                                 handler: () => location.reload(),
                                             }];
-                                            const response_block = $(doc, '.block');
                                             response_block && actions.unshift({
                                                 label: UI.AccountSwitched.ShowDetails,
                                                 async handler() {
@@ -21568,6 +21582,7 @@
                                         } catch (err) {
                                             showLoginError(err?.message || UI.LoginError.UnknownResponse);
                                         } finally {
+                                            closeLoginWindow(login_window);
                                             // UI恢复空闲状态
                                             that.loading = false;
                                         }
@@ -21586,6 +21601,178 @@
                                                     flat: true,
                                                 },
                                             });
+                                        }
+
+                                        /**
+                                         * 向指定顶层窗口提交网页原生登录表单
+                                         * @param {string} target
+                                         * @param {Record<string, string | number>} fields
+                                         * @param {string} jumpurl
+                                         */
+                                        function submitLogin(target, fields, jumpurl) {
+                                            const form = $CrE('form');
+                                            form.method = 'POST';
+                                            form.action = new URL(
+                                                `/login.php?do=submit&jumpurl=${ encodeURIComponent(jumpurl) }`,
+                                                location.href
+                                            ).href;
+                                            form.target = target;
+                                            form.enctype = 'application/x-www-form-urlencoded';
+                                            form.acceptCharset = document.characterSet || 'GBK';
+                                            form.style.display = 'none';
+                                            Object.entries(fields).forEach(([name, value]) => {
+                                                const input = $CrE('input');
+                                                input.type = 'hidden';
+                                                input.name = name;
+                                                input.value = String(value);
+                                                form.append(input);
+                                            });
+                                            document.body.append(form);
+                                            try {
+                                                // name="submit"的表单字段会覆盖form.submit属性
+                                                HTMLFormElement.prototype.submit.call(form);
+                                            } finally {
+                                                form.remove();
+                                            }
+                                        }
+
+                                        /**
+                                         * 等待网页端完成登出
+                                         * @param {Window} target
+                                         * @param {number} deadline
+                                         * @param {Document | undefined} previous_document
+                                         */
+                                        async function waitForLogout(target, deadline, previous_document) {
+                                            await wait(200);
+                                            while (true) {
+                                                assertLoginWindow(target, deadline);
+                                                const state = readLoginWindow(target);
+                                                if (!state || state.doc === previous_document || state.href === 'about:blank' ||
+                                                    state.doc.readyState !== 'complete' || isChallenge(state)) {
+                                                    await wait(200);
+                                                    continue;
+                                                }
+                                                return state.doc;
+                                            }
+                                        }
+
+                                        /**
+                                         * 等待网页端登录结果
+                                         * @param {Window} target
+                                         * @param {number} deadline
+                                         * @param {Document} previous_document
+                                         * @param {boolean} allow_cookie_fallback
+                                         */
+                                        async function waitForLogin(target, deadline, previous_document, allow_cookie_fallback) {
+                                            let unknown_since = null;
+                                            let unknown_url = null;
+                                            while (true) {
+                                                assertLoginWindow(target, deadline);
+                                                const state = readLoginWindow(target);
+                                                const is_logout_page = state?.url?.pathname === '/logout.php';
+                                                if (!state || state.doc === previous_document || state.href === 'about:blank' || is_logout_page ||
+                                                    state.doc.readyState !== 'complete' || isChallenge(state)) {
+                                                    unknown_since = null;
+                                                    await wait(200);
+                                                    continue;
+                                                }
+
+                                                const block_title_element = $(state.doc, '.blocktitle');
+                                                const block_content_element = $(state.doc, '.blockcontent');
+                                                const block_title = block_title_element?.innerText.trim() || state.doc.title.trim();
+                                                const block_content = block_content_element?.innerText.trim() || '';
+                                                if (['登录成功', '登入成功'].includes(block_title)) {
+                                                    const block = $(state.doc, '.block');
+                                                    return {
+                                                        block_title,
+                                                        block_content,
+                                                        response_block: block ? document.importNode(block, true) : null,
+                                                    };
+                                                }
+
+                                                const is_login_page = state.url?.pathname === '/login.php';
+                                                // 成功页可能已按meta refresh跳转，登出后重新出现的登录Cookie可作为后备判定
+                                                if (!is_login_page && allow_cookie_fallback && utils.isLoggedIn()) {
+                                                    return {
+                                                        block_title: UI.AccountSwitched.Message,
+                                                        block_content: '',
+                                                        response_block: null,
+                                                    };
+                                                }
+                                                if (is_login_page && (block_title_element || block_content_element)) {
+                                                    throw new Error(block_content || block_title);
+                                                }
+
+                                                if (unknown_since === null || unknown_url !== state.href) {
+                                                    unknown_url = state.href;
+                                                    unknown_since = Date.now();
+                                                } else if (Date.now() - unknown_since >= 1000) {
+                                                    throw new Error(UI.LoginError.UnknownResponse);
+                                                }
+                                                await wait(200);
+                                            }
+                                        }
+
+                                        /**
+                                         * @param {Window} target
+                                         * @param {number} deadline
+                                         */
+                                        function assertLoginWindow(target, deadline) {
+                                            if (target.closed) throw new Error(UI.LoginError.WindowClosed);
+                                            if (Date.now() >= deadline) throw new Error(UI.LoginError.Timeout);
+                                        }
+
+                                        /**
+                                         * @param {Window} target
+                                         */
+                                        function readLoginWindow(target) {
+                                            try {
+                                                const href = target.location.href;
+                                                return {
+                                                    win: target,
+                                                    href,
+                                                    url: href === 'about:blank' ? null : new URL(href),
+                                                    doc: target.document,
+                                                };
+                                            } catch (_) {
+                                                // Cloudflare导航期间暂时不可读时继续等待
+                                                return null;
+                                            }
+                                        }
+
+                                        /**
+                                         * @param {{ win: Window, url: URL | null, doc: Document }} state
+                                         */
+                                        function isChallenge(state) {
+                                            try {
+                                                return state.url?.pathname.startsWith('/cdn-cgi/') ||
+                                                    Boolean(state.win._cf_chl_opt) ||
+                                                    Boolean(state.doc.querySelector([
+                                                        '#challenge-running',
+                                                        '#cf-challenge-running',
+                                                        '#challenge-stage',
+                                                        'form#challenge-form',
+                                                        'form[action*="/cdn-cgi/"]',
+                                                        'input[name="cf-turnstile-response"]',
+                                                        'script[src*="/cdn-cgi/challenge-platform/"]',
+                                                    ].join(','))) ||
+                                                    (/just a moment/i.test(state.doc.title) &&
+                                                        /cloudflare/i.test(state.doc.body?.innerText || ''));
+                                            } catch (_) {
+                                                return true;
+                                            }
+                                        }
+
+                                        /** @param {number} timeout */
+                                        function wait(timeout) {
+                                            return new Promise(resolve => setTimeout(resolve, timeout));
+                                        }
+
+                                        /** @param {Window | null | undefined} target */
+                                        function closeLoginWindow(target) {
+                                            try {
+                                                target && !target.closed && target.close();
+                                            } catch (_) {}
                                         }
                                     },
 
