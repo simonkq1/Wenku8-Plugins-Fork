@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name               轻小说文库+
 // @namespace          https://greasyfork.org/users/667968-pyudng
-// @version            2.31.3
+// @version            2.32.0
 // @description        轻小说文库全方位体验改善，涵盖阅读、下载、书架、推荐、书评、账号、页面个性化等各种方面，你能想到的这里都有。没有？欢迎提出你的点子。
 // @author             PY-DNG
 // @license            GPL-3.0-or-later
@@ -752,6 +752,8 @@
                     Settings: {
                         Label: '在线阅读',
                         Enabled: '启用',
+                        FloatingPageButtons: '显示悬浮翻页按钮',
+                        FloatingPageButtonsCaption: '在小说阅读页左右两侧显示上一页和下一页按钮',
                         ChapterAction: '章节操作按钮功能',
                         ChapterActionOptions: [{
                             label: '复制章节全文',
@@ -769,6 +771,11 @@
                             Download: '下载本章',
                             Downloaded: '已开始下载',
                         },
+                    },
+                    PageNavigation: {
+                        Label: '章节翻页',
+                        Previous: '上一页',
+                        Next: '下一页',
                     },
                     UI: {
                         Title: '阅读器样式调节',
@@ -1600,6 +1607,8 @@
                     Settings: {
                         Label: '線上閱讀',
                         Enabled: '啟用',
+                        FloatingPageButtons: '顯示浮動翻頁按鈕',
+                        FloatingPageButtonsCaption: '在小說閱讀頁左右兩側顯示上一頁與下一頁按鈕',
                         ChapterAction: '章節操作按鈕功能',
                         ChapterActionOptions: [{
                             label: '複製章節全文',
@@ -1617,6 +1626,11 @@
                             Download: '下載本章',
                             Downloaded: '已開始下載',
                         },
+                    },
+                    PageNavigation: {
+                        Label: '章節翻頁',
+                        Previous: '上一頁',
+                        Next: '下一頁',
                     },
                     UI: {
                         Title: '閱讀器樣式調節',
@@ -20354,6 +20368,8 @@
                 GM_getValue = utils.defaultedGet({
                     /** @type {boolean} */
                     enabled: true,
+                    /** @type {boolean} */
+                    floating_page_buttons: true,
                     /** @type {string[]} 已保存的字体列表，包含内置的字体名称和用户自己填写的字体名称 */
                     saved_fonts: CONST.Text.Reader.UI.FontOptions,
                     /** @type {string} 用户当前应用的字体 */
@@ -20377,6 +20393,13 @@
                         key: 'enabled',
                         get() { return GM_getValue('enabled'); },
                         set(val) { GM_setValue('enabled', val); },
+                    }, {
+                        label: Settings.FloatingPageButtons,
+                        caption: Settings.FloatingPageButtonsCaption,
+                        type: 'boolean',
+                        key: 'floating_page_buttons',
+                        get() { return GM_getValue('floating_page_buttons'); },
+                        set(val) { GM_setValue('floating_page_buttons', val); },
                     }, {
                         label: Settings.ChapterAction,
                         type: 'select',
@@ -20577,17 +20600,19 @@
                             value: '/modules/article/reader.php'
                         }],
                         async func() {
+                            const Reader = CONST.Text.Reader;
                             /** @type {HTMLDivElement} */
                             const style_keys = ['enabled', 'font', 'font_size', 'color', 'scroll_speed'];
 
                             const update = (key, old_val, new_val, remote) => utils.deepEqual(old_val, new_val) || applyEnhancement();
                             style_keys.forEach(key => GM_addValueChangeListener(key, update));
                             applyEnhancement();
+                            GM_addValueChangeListener('floating_page_buttons', renderPageNavigation);
+                            renderPageNavigation();
 
                             function applyEnhancement() {
                                 // 平滑滚动控制器
                                 let controller = smoothScroll(utils.window);
-                                const Reader = CONST.Text.Reader;
 
                                 [styling, pageDocButton].forEach(f => f());
                                 GM_addValueChangeListener('chapter_action', () => pageDocButton());
@@ -20897,6 +20922,119 @@
                                         get target() { return scrollTarget; }
                                     };
                                 }
+                            }
+
+                            /**
+                             * 在阅读页面两侧显示上一页和下一页按钮
+                             */
+                            function renderPageNavigation() {
+                                $('#plus-reader-page-navigation')?.remove();
+                                $('#plus-reader-page-navigation-style')?.remove();
+                                if (!GM_getValue('floating_page_buttons')) { return; }
+
+                                const previous = findNavigationLink(['上一页', '上一頁', '上一章']);
+                                const next = findNavigationLink(['下一页', '下一頁', '下一章']);
+                                if (!previous && !next) { return; }
+
+                                const container = $CrE('nav');
+                                container.id = 'plus-reader-page-navigation';
+                                container.setAttribute('aria-label', Reader.PageNavigation.Label);
+
+                                [{
+                                    link: previous,
+                                    side: 'previous',
+                                    icon: 'chevron_left',
+                                    label: Reader.PageNavigation.Previous,
+                                }, {
+                                    link: next,
+                                    side: 'next',
+                                    icon: 'chevron_right',
+                                    label: Reader.PageNavigation.Next,
+                                }].forEach(({ link, side, icon, label }) => {
+                                    if (!link) { return; }
+
+                                    const button = $CrE('a');
+                                    button.className = `plus-reader-page-button plus-reader-page-${ side }`;
+                                    button.setAttribute('href', link.getAttribute('href'));
+                                    link.hasAttribute('target') && button.setAttribute('target', link.getAttribute('target'));
+                                    button.title = label;
+                                    button.setAttribute('aria-label', label);
+
+                                    const icon_element = $CrE('span');
+                                    icon_element.className = 'material-icons';
+                                    icon_element.setAttribute('aria-hidden', 'true');
+                                    icon_element.innerText = icon;
+                                    button.append(icon_element);
+                                    container.append(button);
+                                });
+
+                                document.body.append(container);
+                                addStyle(`
+                                    .plus-reader-page-button {
+                                        position: fixed;
+                                        top: 50%;
+                                        transform: translateY(-50%);
+                                        z-index: 1999;
+                                        display: flex;
+                                        align-items: center;
+                                        justify-content: center;
+                                        width: 48px;
+                                        height: 48px;
+                                        border-radius: 50%;
+                                        color: white !important;
+                                        background: color-mix(in srgb, var(--q-primary) 70%, transparent);
+                                        box-shadow: 0 2px 8px rgb(0 0 0 / 30%);
+                                        text-decoration: none !important;
+                                        transition: background .2s, transform .2s;
+                                    }
+                                    .plus-reader-page-button:hover,
+                                    .plus-reader-page-button:focus-visible {
+                                        background: var(--q-primary);
+                                        transform: translateY(-50%) scale(1.08);
+                                        outline: none;
+                                    }
+                                    .plus-reader-page-button .material-icons {
+                                        font-size: 32px;
+                                    }
+                                    .plus-reader-page-previous {
+                                        left: 16px;
+                                    }
+                                    .plus-reader-page-next {
+                                        right: 16px;
+                                    }
+                                    @media (max-width: 600px) {
+                                        .plus-reader-page-button {
+                                            width: 40px;
+                                            height: 40px;
+                                        }
+                                        .plus-reader-page-button .material-icons {
+                                            font-size: 28px;
+                                        }
+                                        .plus-reader-page-previous {
+                                            left: 6px;
+                                        }
+                                        .plus-reader-page-next {
+                                            right: 6px;
+                                        }
+                                    }
+                                `, 'plus-reader-page-navigation-style');
+                            }
+
+                            /**
+                             * 优先从页面底部、其次从页面顶部查找翻页链接
+                             * @param {string[]} labels
+                             * @returns {HTMLAnchorElement|null}
+                             */
+                            function findNavigationLink(labels) {
+                                for (const selector of ['#footlink a', '#headlink a']) {
+                                    const link = [...$All(selector)].find(link => {
+                                        const label = (link.innerText || link.textContent || '').replace(/\s+/g, '');
+                                        const href = link.getAttribute('href')?.trim();
+                                        return labels.includes(label) && href && href !== '#' && !href.toLowerCase().startsWith('javascript:');
+                                    });
+                                    if (link) { return link; }
+                                }
+                                return null;
                             }
                         }
                     },
