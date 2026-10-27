@@ -331,8 +331,8 @@
                 },
                 Bookcase: {
                     Collector: {
-                        FetchingBookcases: '正在调阅书架...',
-                        ArrangingBookcases: '正在整理书架...',
+                        FetchingBookcases: '正在后台读取书架，可继续操作',
+                        BookcasesReady: '书架整合完成',
                         UpdatingBookcase: '正在更新书架...',
                         SubmitingChange: '正在提交更改...',
                         RefreshBookcase: '刷新书架内容',
@@ -1172,8 +1172,8 @@
                 },
                 Bookcase: {
                     Collector: {
-                        FetchingBookcases: '正在調閱書架...',
-                        ArrangingBookcases: '正在整理書架...',
+                        FetchingBookcases: '正在背景讀取書架，可繼續操作',
+                        BookcasesReady: '書架整合完成',
                         UpdatingBookcase: '正在更新書架...',
                         SubmitingChange: '正在提交變更...',
                         RefreshBookcase: '重新整理書架內容',
@@ -2415,6 +2415,8 @@
                             error.name = 'HTTPError';
                             error.status = response.status;
                             error.url = url;
+                            const retry_after = response.responseHeaders?.match(/^retry-after:[ \t]*([^\r\n]*)/im)?.[1].trim();
+                            if (retry_after) { error.retryAfter = retry_after; }
                             reject(error);
                             return;
                         }
@@ -12749,7 +12751,11 @@
                             let last_fetch_time = 0;
 
                             // 获取所有书架页面
-                            Quasar.Loading.show({ message: CONST.Text.Bookcase.Collector.FetchingBookcases });
+                            Quasar.Notify.create({
+                                type: 'info',
+                                message: CONST.Text.Bookcase.Collector.FetchingBookcases,
+                                group: 'bookcase.loading',
+                            });
                             let page_classid = parseInt(new URLSearchParams(location.search).get('classid') ?? '0', 10);
                             const forms = [];
                             try {
@@ -12761,12 +12767,9 @@
                             } catch (err) {
                                 notifyBookcaseError(err);
                                 return { available: false };
-                            } finally {
-                                Quasar.Loading.hide();
                             }
 
                             // 切换书架功能
-                            Quasar.Loading.show({ message: CONST.Text.Bookcase.Collector.ArrangingBookcases });
                             /** @type {(classid: number) => void} */
                             const switchBookcase = classid => {
                                 // 切换form
@@ -12978,7 +12981,11 @@
                                 })
                             );
 
-                            Quasar.Loading.hide();
+                            Quasar.Notify.create({
+                                type: 'success',
+                                message: CONST.Text.Bookcase.Collector.BookcasesReady,
+                                group: 'bookcase.ready',
+                            });
 
                             /**
                              * 询问用户是否要将某一书籍移出书架
@@ -13023,7 +13030,10 @@
                                     return getBookcaseForm(doc, url);
                                 } catch (err) {
                                     if (err?.name === 'HTTPError' && err.status === 429 && retry < retry_delays.length) {
-                                        await delay(retry_delays[retry]);
+                                        const retry_after = err.retryAfter ?? '';
+                                        const retry_after_ms = /^\d+$/.test(retry_after) ?
+                                            Number(retry_after) * 1000 : Date.parse(retry_after) - Date.now();
+                                        await delay(Math.max(retry_delays[retry], Number.isFinite(retry_after_ms) ? retry_after_ms : 0));
                                         return fetchBookcase(classid, retry + 1);
                                     }
                                     throw err;
