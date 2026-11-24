@@ -3,7 +3,7 @@
 // @namespace          https://greasyfork.org/users/667968-pyudng
 // @version            2.32.0
 // @description        轻小说文库全方位体验改善，涵盖阅读、下载、书架、推荐、书评、账号、页面个性化等各种方面，你能想到的这里都有。没有？欢迎提出你的点子。
-// @author             PY-DNG
+// @author             PY-DNG / simonkq1(本分支)
 // @license            GPL-3.0-or-later
 // @homepageURL        https://greasyfork.org/scripts/539514
 // @supportURL         https://greasyfork.org/scripts/539514/feedback
@@ -45,8 +45,8 @@
 // @grant              GM_addElement
 // @grant              GM_xmlhttpRequest
 // @grant              GM_setClipboard
-// @downloadURL https://update.greasyfork.org/scripts/539514/%E8%BD%BB%E5%B0%8F%E8%AF%B4%E6%96%87%E5%BA%93%2B.user.js
-// @updateURL https://update.greasyfork.org/scripts/539514/%E8%BD%BB%E5%B0%8F%E8%AF%B4%E6%96%87%E5%BA%93%2B.meta.js
+// @downloadURL https://raw.githubusercontent.com/simonkq1/Wenku8-Plugins-Fork/main/wenku8-plugin.js
+// @updateURL https://raw.githubusercontent.com/simonkq1/Wenku8-Plugins-Fork/main/wenku8-plugin.js
 // ==/UserScript==
 
 /* eslint-disable no-multi-spaces */
