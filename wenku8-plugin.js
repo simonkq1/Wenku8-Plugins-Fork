@@ -211,6 +211,9 @@
                         NoEmptyContent: '已成功发送空气',
                         NoEmptyContentCaption: '不可发送空白内容',
                         SendingReply: '正在发送评论...',
+                        ReplySendError: '无法确认评论是否已提交',
+                        ReplySendErrorCaption: '请先查看书评页面，确认评论状态后再决定是否重新提交。',
+                        ReplySendForbidden: '网站拒绝请求（HTTP 403）。请先查看书评页面，确认评论状态。',
                         ReplySent: '已提交评论',
                         SentStatusDetails: '查看详情',
                         DetailsOk: '已阅',
@@ -907,13 +910,18 @@
                         Password: '密码',
                         SavePassword: '记住密码',
                         Ok: '切换',
+                        CompleteLogin: '请在文库登录窗口完成验证并提交。',
+                        AutoLogin: '正在自动登录',
                         LoginError: {
                             Title: '登录错误',
                             Message: '登录发生错误：{Info}',
                             UnknownResponse: '服务器返回了未知结果',
                             PopupBlocked: '登录窗口被浏览器拦截，请允许本站打开弹出窗口后重试',
                             WindowClosed: '登录窗口已关闭，帐号切换已取消',
-                            Timeout: '登录操作已超时，请重试',
+                            Timeout: '等待登录已超时，可在登录窗口继续操作',
+                            UsernameRequired: '请选择或输入要切换的帐号',
+                            SecurePageRequired: '请先打开文库的 HTTPS 页面，再切换帐号',
+                            AccountUnverified: '无法确认登录的是所选帐号，请在登录窗口检查',
                             Ok: '确定',
                         },
                         AccountSwitched: {
@@ -1066,6 +1074,9 @@
                         NoEmptyContent: '已成功傳送空氣',
                         NoEmptyContentCaption: '不可傳送空白內容',
                         SendingReply: '正在傳送評論...',
+                        ReplySendError: '無法確認評論是否已提交',
+                        ReplySendErrorCaption: '請先查看書評頁面，確認評論狀態後再決定是否重新提交。',
+                        ReplySendForbidden: '網站拒絕請求（HTTP 403）。請先查看書評頁面，確認評論狀態。',
                         ReplySent: '已提交評論',
                         SentStatusDetails: '查看詳情',
                         DetailsOk: '已閱',
@@ -1762,13 +1773,18 @@
                         Password: '密碼',
                         SavePassword: '記住密碼',
                         Ok: '切換',
+                        CompleteLogin: '請在文庫登入視窗完成驗證並送出。',
+                        AutoLogin: '正在自動登入',
                         LoginError: {
                             Title: '登入錯誤',
                             Message: '登入發生錯誤：{Info}',
                             UnknownResponse: '伺服器回傳了未知結果',
                             PopupBlocked: '登入視窗被瀏覽器阻擋，請允許本站開啟彈出視窗後重試',
                             WindowClosed: '登入視窗已關閉，帳號切換已取消',
-                            Timeout: '登入操作已逾時，請重試',
+                            Timeout: '等待登入已逾時，可在登入視窗繼續操作',
+                            UsernameRequired: '請選擇或輸入要切換的帳號',
+                            SecurePageRequired: '請先開啟文庫的 HTTPS 頁面，再切換帳號',
+                            AccountUnverified: '無法確認登入的是所選帳號，請在登入視窗檢查',
                             Ok: '確定',
                         },
                         AccountSwitched: {
@@ -8748,11 +8764,11 @@
                             function hookSubmit(form, onSend, to_last=true) {
                                 let submit_ongoing = false;
                                 $AEL(form, 'submit', async e => {
-                                    if (!GM_getValue('enabled')) { return; }
-                                    if (submit_ongoing) { return; }
+                                    if (!submit_ongoing && !GM_getValue('enabled')) { return; }
 
                                     // 拦截默认行为
                                     e.preventDefault();
+                                    if (submit_ongoing) { return; }
                                     const ReplyInPage = CONST.Text.Review.ReplyInPage;
 
                                     // 表单数据
@@ -8776,17 +8792,29 @@
                                     // 发送评论
                                     submit_ongoing = true;
                                     Quasar.Loading.show({ message: ReplyInPage.SendingReply });
-                                    const data = utils.serializeFormData(formdata);
-                                    const doc = await utils.requestDocument({
-                                        method: 'POST',
-                                        url: form.getAttribute('action'),
-                                        data,
-                                        headers: {
-                                            'content-type': 'application/x-www-form-urlencoded'
-                                        }
-                                    });
-                                    Quasar.Loading.hide();
-                                    submit_ongoing = false;
+                                    /** @type {Document} */
+                                    let doc;
+                                    try {
+                                        const data = utils.serializeFormData(formdata);
+                                        doc = await utils.requestDocument({
+                                            method: 'POST',
+                                            url: form.getAttribute('action'),
+                                            data,
+                                            headers: {
+                                                'content-type': 'application/x-www-form-urlencoded'
+                                            }
+                                        });
+                                    } catch (err) {
+                                        Quasar.Notify.create({
+                                            type: 'error',
+                                            message: ReplyInPage.ReplySendError,
+                                            caption: err?.status === 403 ? ReplyInPage.ReplySendForbidden : ReplyInPage.ReplySendErrorCaption,
+                                        });
+                                        return;
+                                    } finally {
+                                        Quasar.Loading.hide();
+                                        submit_ongoing = false;
+                                    }
 
                                     // 发送完成提示
                                     const is_block = !!$(doc, '.block');
@@ -21298,14 +21326,12 @@
                 const utils = require('utils');
                 /** @type {configs} */
                 const configs = require('configs');
-                /** @type {api} */
-                const api = require('api');
                 /** @type {mousetip} */
                 const mousetip = require('mousetip');
 
                 // 文库使用cookie `PHPSESSID` 作为登录凭据，但脚本不保存和处理此值，因为此值随时可能因用户点击退出登录、超时等原因失效而脚本无法得知
                 // 脚本仅保存帐号和密码（如果用户勾选了保存密码），每次切换帐号时主动退出当前帐号并重新登录
-                // 脚本以网页端登录结果为准，登录成功后尝试同步api登录状态
+                // 脚本以网页端登录结果为准
                 /**
                  * @typedef {Object} Account
                  * @property {string} username - 用户名
@@ -21493,6 +21519,7 @@
                                                         <q-input
                                                             v-model="password"
                                                             ref="password_input"
+                                                            type="password"
                                                         ></q-input>
                                                     </q-item-section>
                                                 </q-item>
@@ -21586,28 +21613,27 @@
 
                                     // 切换帐号逻辑
                                     async doSwitch() {
-                                        // 1. 打开同源顶层窗口，使用网页原生导航登出当前帐号
-                                        // 2. 向登录窗口提交网页原生登录表单
-                                        // 3. 等待网页登录结果或用户完成Cloudflare验证
-                                        // 4. 如果网页端登录失败，则显示服务器错误并终止帐号切换
-                                        // 5. 保存帐号信息；如果用户勾选了"记住密码"，同时保存密码
-                                        // 6. 尝试同步api登录状态，最多等待3秒
-                                        // 7. Notify提示登录完成，并允许查看登录结果
-                                        // 8. UI恢复空闲状态
-
                                         const that = this;
-                                        const username = that.username;
+                                        if (that.loading) { return; }
+                                        if (location.protocol !== 'https:') {
+                                            showLoginError(UI.LoginError.SecurePageRequired);
+                                            return;
+                                        }
+                                        const username = that.username.trim();
+                                        if (!username) {
+                                            showLoginError(UI.LoginError.UsernameRequired);
+                                            return;
+                                        }
                                         const password = that.password;
                                         const save_password = that.save_password;
                                         const is_email = username.includes('@');
-                                        const login_window_name = 'wenku8-plus-accountswitch-login';
                                         let login_window;
 
                                         // window.open必须直接由点击事件触发，否则会被浏览器拦截
                                         try {
                                             login_window = window.open(
                                                 '',
-                                                login_window_name,
+                                                '_blank',
                                                 'popup=yes,width=520,height=640,resizable=yes,scrollbars=yes'
                                             );
                                         } catch (_) {}
@@ -21616,7 +21642,7 @@
                                             return;
                                         }
 
-                                        // UI置于"加载中"状态
+                                        const form_listeners = new AbortController();
                                         that.loading = true;
 
                                         try {
@@ -21626,49 +21652,25 @@
                                             login_window.location = new URL('/logout.php', location.href).href;
                                             const logout_document =
                                                 await waitForLogout(login_window, deadline, initial_document);
-                                            const allow_cookie_fallback = !utils.isLoggedIn();
-
-                                            // 网页原生表单登录
-                                            const jumpurl = `http://${ location.host }/index.php`;
-                                            submitLogin(login_window_name, {
-                                                username,
-                                                password,
-                                                usecookie: 315360000, // 保存一年
-                                                action: 'login',
-                                                submit: '&#160;登&#160;&#160;录&#160;',
-                                            }, jumpurl);
-                                            const { block_title, block_content, response_block } =
-                                                await waitForLogin(
-                                                    login_window,
-                                                    deadline,
-                                                    logout_document,
-                                                    allow_cookie_fallback
-                                                );
+                                            login_window.location = new URL('/login.php', location.href).href;
+                                            const { block_title, block_content, response_block, can_save_password } =
+                                                await waitForLogin(login_window, deadline, logout_document);
                                             closeLoginWindow(login_window);
-                                            login_window = null;
 
                                             // 保存帐号信息
                                             /** @type {Account[]} */
                                             const accounts = GM_getValue('accounts');
-                                            let account = accounts.find(acc => acc.username === username);
-                                            if (account) {
-                                                account.password = save_password ? password : null;
-                                            } else {
+                                            const account = accounts.find(acc => acc.username === username);
+                                            const saved_password = !save_password ? null :
+                                                can_save_password ? password : account?.password ?? null;
+                                            if (!account) {
                                                 const nickname = block_content.match(/^\s*(.+?)[，,]\s*(?:欢迎您到来|歡迎您到來)/m)?.[1]?.trim() || username;
-                                                account = { username, nickname };
-                                                account.password = save_password ? password : null;
-                                                accounts.push(account);
+                                                accounts.push({ username, nickname, password: saved_password });
+                                                GM_setValue('accounts', accounts);
+                                            } else if (account.password !== saved_password) {
+                                                account.password = saved_password;
+                                                GM_setValue('accounts', accounts);
                                             }
-                                            GM_setValue('accounts', accounts);
-
-                                            // 尝试同步api登录状态，请求结果不影响网页端登录
-                                            const api_sync = api.logout()
-                                                .then(() => api.login(username, password, is_email))
-                                                .catch(() => {});
-                                            await Promise.race([
-                                                api_sync,
-                                                new Promise(resolve => setTimeout(resolve, 3 * 1000)),
-                                            ]);
 
                                             // Notify提示切换帐号完成
                                             const actions = [{
@@ -21730,8 +21732,7 @@
                                         } catch (err) {
                                             showLoginError(err?.message || UI.LoginError.UnknownResponse);
                                         } finally {
-                                            closeLoginWindow(login_window);
-                                            // UI恢复空闲状态
+                                            form_listeners.abort();
                                             that.loading = false;
                                         }
 
@@ -21752,39 +21753,6 @@
                                         }
 
                                         /**
-                                         * 向指定顶层窗口提交网页原生登录表单
-                                         * @param {string} target
-                                         * @param {Record<string, string | number>} fields
-                                         * @param {string} jumpurl
-                                         */
-                                        function submitLogin(target, fields, jumpurl) {
-                                            const form = $CrE('form');
-                                            form.method = 'POST';
-                                            form.action = new URL(
-                                                `/login.php?do=submit&jumpurl=${ encodeURIComponent(jumpurl) }`,
-                                                location.href
-                                            ).href;
-                                            form.target = target;
-                                            form.enctype = 'application/x-www-form-urlencoded';
-                                            form.acceptCharset = document.characterSet || 'GBK';
-                                            form.style.display = 'none';
-                                            Object.entries(fields).forEach(([name, value]) => {
-                                                const input = $CrE('input');
-                                                input.type = 'hidden';
-                                                input.name = name;
-                                                input.value = String(value);
-                                                form.append(input);
-                                            });
-                                            document.body.append(form);
-                                            try {
-                                                // name="submit"的表单字段会覆盖form.submit属性
-                                                HTMLFormElement.prototype.submit.call(form);
-                                            } finally {
-                                                form.remove();
-                                            }
-                                        }
-
-                                        /**
                                          * 等待网页端完成登出
                                          * @param {Window} target
                                          * @param {number} deadline
@@ -21795,8 +21763,8 @@
                                             while (true) {
                                                 assertLoginWindow(target, deadline);
                                                 const state = readLoginWindow(target);
-                                                if (!state || state.doc === previous_document || state.href === 'about:blank' ||
-                                                    state.doc.readyState !== 'complete' || isChallenge(state)) {
+                                                if (!state || state.doc === previous_document || state.url?.origin !== location.origin ||
+                                                    state.doc.readyState !== 'complete' || isChallenge(state) || getSignedInUser()) {
                                                     await wait(200);
                                                     continue;
                                                 }
@@ -21809,56 +21777,198 @@
                                          * @param {Window} target
                                          * @param {number} deadline
                                          * @param {Document} previous_document
-                                         * @param {boolean} allow_cookie_fallback
                                          */
-                                        async function waitForLogin(target, deadline, previous_document, allow_cookie_fallback) {
-                                            let unknown_since = null;
-                                            let unknown_url = null;
+                                        async function waitForLogin(target, deadline, previous_document) {
+                                            const prepared_documents = new WeakMap();
+                                            let submission;
+                                            let password_edited = false;
+                                            let expiry_defaulted = false;
+                                            let automatic_attempted = false;
+                                            let automatic_document;
+                                            let automatic_submission = null;
+                                            let manual_required = false;
+                                            let manual_notice_shown = false;
                                             while (true) {
                                                 assertLoginWindow(target, deadline);
                                                 const state = readLoginWindow(target);
-                                                const is_logout_page = state?.url?.pathname === '/logout.php';
-                                                if (!state || state.doc === previous_document || state.href === 'about:blank' || is_logout_page ||
-                                                    state.doc.readyState !== 'complete' || isChallenge(state)) {
-                                                    unknown_since = null;
+                                                if (!state || state.doc === previous_document || state.url?.origin !== location.origin ||
+                                                    state.url.pathname === '/logout.php' || state.doc.readyState !== 'complete') {
                                                     await wait(200);
                                                     continue;
                                                 }
 
-                                                const block_title_element = $(state.doc, '.blocktitle');
-                                                const block_content_element = $(state.doc, '.blockcontent');
-                                                const block_title = block_title_element?.innerText.trim() || state.doc.title.trim();
-                                                const block_content = block_content_element?.innerText.trim() || '';
-                                                if (['登录成功', '登入成功'].includes(block_title)) {
-                                                    const block = $(state.doc, '.block');
+                                                const is_login_page = state.url.pathname === '/login.php';
+                                                if (is_login_page && !prepared_documents.has(state.doc)) {
+                                                    const fields = getLoginForm(state);
+                                                    if (fields) {
+                                                        const { form, account_input, password_input } = fields;
+                                                        submission = undefined;
+                                                        if (!account_input.value) { account_input.value = username; }
+                                                        const prefill_password = Boolean(password && !password_input.value &&
+                                                            account_input.value.trim() === username);
+                                                        if (prefill_password) { password_input.value = password; }
+                                                        if (!expiry_defaulted) {
+                                                            const selects = form.querySelectorAll('select[name="usecookie"]');
+                                                            const select = selects.length === 1 ? selects[0] : null;
+                                                            if (select?.form === form && !select.matches(':disabled')) {
+                                                                const year_options = Array.from(select.options).filter(option =>
+                                                                    !option.matches(':disabled') && /^(?:一年|1\s*年)$/.test(option.label.trim()));
+                                                                if (year_options.length === 1) {
+                                                                    expiry_defaulted = true;
+                                                                    if (select.value !== year_options[0].value) {
+                                                                        select.value = year_options[0].value;
+                                                                        select.dispatchEvent(new target.Event('change', { bubbles: true }));
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                        prepared_documents.set(state.doc, { ...fields, password_available: Boolean(password_input.value) });
+                                                        const options = { signal: form_listeners.signal };
+                                                        const markPasswordEdited = () => { password_edited = true; };
+                                                        password_input.addEventListener('input', markPasswordEdited, options);
+                                                        password_input.addEventListener('change', markPasswordEdited, options);
+                                                        form.addEventListener('submit', e => {
+                                                            const is_automatic = automatic_submission?.form === form &&
+                                                                automatic_submission.submitter === e.submitter;
+                                                            if (is_automatic) { automatic_submission.event = e; }
+                                                            if ((!e.isTrusted && !is_automatic) || e.defaultPrevented) { return; }
+                                                            if (is_automatic && (getLoginForm(state)?.form !== form ||
+                                                                hasLoginVerification(state, fields) || isChallenge(state) ||
+                                                                account_input.value.trim() !== username || password_edited ||
+                                                                getLoginSubmitter(state, fields) !== e.submitter)) {
+                                                                e.preventDefault();
+                                                                manual_required = true;
+                                                                return;
+                                                            }
+                                                            submission = {
+                                                                doc: state.doc,
+                                                                username: account_input.value.trim(),
+                                                                prefill_password,
+                                                            };
+                                                        }, options);
+                                                    }
+                                                }
+
+                                                if (isChallenge(state)) {
+                                                    manual_required = true;
+                                                    showManualLogin();
+                                                    await wait(200);
+                                                    continue;
+                                                }
+                                                const block_title = $(state.doc, '.blocktitle')?.innerText.trim() || state.doc.title.trim();
+                                                const success_block = ['登录成功', '登入成功'].includes(block_title);
+                                                const userinfo = getSignedInUser();
+                                                if (userinfo && (success_block || !is_login_page)) {
+                                                    const selected_account_submitted = submission?.doc !== state.doc &&
+                                                        submission?.username === username;
+                                                    const account_matches = is_email ? success_block && selected_account_submitted :
+                                                        userinfo.jieqiUserName?.trim() === username;
+                                                    if (!account_matches) { throw new Error(UI.LoginError.AccountUnverified); }
+                                                    const block = success_block && $(state.doc, '.block');
                                                     return {
-                                                        block_title,
-                                                        block_content,
+                                                        block_title: success_block ? block_title : UI.AccountSwitched.Message,
+                                                        block_content: success_block ? $(state.doc, '.blockcontent')?.innerText.trim() || '' : '',
                                                         response_block: block ? document.importNode(block, true) : null,
+                                                        can_save_password: selected_account_submitted && submission.prefill_password && !password_edited,
                                                     };
                                                 }
-
-                                                const is_login_page = state.url?.pathname === '/login.php';
-                                                // 成功页可能已按meta refresh跳转，登出后重新出现的登录Cookie可作为后备判定
-                                                if (!is_login_page && allow_cookie_fallback && utils.isLoggedIn()) {
-                                                    return {
-                                                        block_title: UI.AccountSwitched.Message,
-                                                        block_content: '',
-                                                        response_block: null,
-                                                    };
-                                                }
-                                                if (is_login_page && (block_title_element || block_content_element)) {
-                                                    throw new Error(block_content || block_title);
-                                                }
-
-                                                if (unknown_since === null || unknown_url !== state.href) {
-                                                    unknown_url = state.href;
-                                                    unknown_since = Date.now();
-                                                } else if (Date.now() - unknown_since >= 1000) {
-                                                    throw new Error(UI.LoginError.UnknownResponse);
+                                                if (is_login_page) {
+                                                    const fields = prepared_documents.get(state.doc);
+                                                    const submitter = fields && getLoginSubmitter(state, fields);
+                                                    const request_submit = target.HTMLFormElement?.prototype.requestSubmit;
+                                                    if (!fields || hasLoginVerification(state, fields) || !submitter ||
+                                                        !fields.password_available || password_edited ||
+                                                        fields.account_input.value.trim() !== username || !request_submit ||
+                                                        (automatic_attempted && automatic_document !== state.doc)) {
+                                                        manual_required = true;
+                                                    }
+                                                    if (!manual_required && !automatic_attempted) {
+                                                        automatic_attempted = true;
+                                                        automatic_document = state.doc;
+                                                        Quasar.Notify.create({ type: 'info', message: UI.AutoLogin });
+                                                        automatic_submission = { form: fields.form, submitter };
+                                                        try {
+                                                            request_submit.call(fields.form, submitter);
+                                                            if (!automatic_submission.event || automatic_submission.event.defaultPrevented) {
+                                                                manual_required = true;
+                                                            }
+                                                        } catch (_) {
+                                                            manual_required = true;
+                                                        } finally {
+                                                            automatic_submission = null;
+                                                        }
+                                                    }
+                                                    if (manual_required) { showManualLogin(); }
                                                 }
                                                 await wait(200);
                                             }
+
+                                            function showManualLogin() {
+                                                if (manual_notice_shown) { return; }
+                                                manual_notice_shown = true;
+                                                Quasar.Notify.create({ type: 'info', message: UI.CompleteLogin });
+                                            }
+                                        }
+
+                                        function hasLoginVerification(state, { form, account_input, password_input }) {
+                                            if (state.doc.querySelector([
+                                                '.cf-turnstile', '.g-recaptcha', '.h-captcha',
+                                                '[name="cf-turnstile-response"]', '[name="g-recaptcha-response"]', '[name="h-captcha-response"]',
+                                                'iframe[src*="challenges.cloudflare.com"]', 'iframe[src*="recaptcha"]', 'iframe[src*="hcaptcha.com"]',
+                                                'script[src*="challenges.cloudflare.com"]', 'script[src*="recaptcha"]', 'script[src*="hcaptcha.com"]',
+                                            ].join(','))) { return true; }
+                                            const verification = /captcha|check[\s_-]?(?:code|num)|sec[\s_-]?code|auth[\s_-]?code|verify[\s_-]?code|vcode|one-time-code|验证码|驗證碼|校验码|校驗碼|verification\s*code/i;
+                                            return Array.from(form.elements).some(input => {
+                                                const labelledby = (input.getAttribute('aria-labelledby') || '').split(/\s+/)
+                                                    .map(id => state.doc.getElementById(id)?.textContent || '').join(' ');
+                                                const description = [input.name, input.id, input.autocomplete, input.getAttribute('aria-label'),
+                                                    input.getAttribute('placeholder'), labelledby, ...Array.from(input.labels || [], label => label.textContent)].join(' ');
+                                                if (verification.test(description)) { return true; }
+                                                return input !== account_input && input !== password_input && !input.disabled && !input.readOnly &&
+                                                    (input.tagName === 'TEXTAREA' || (input.tagName === 'INPUT' &&
+                                                        ['text', 'email', 'password', 'number', 'tel', 'url', 'search'].includes(input.type)));
+                                            });
+                                        }
+
+                                        function getLoginSubmitter(state, fields) {
+                                            const current = getLoginForm(state);
+                                            if (current?.form !== fields.form || current.account_input !== fields.account_input ||
+                                                current.password_input !== fields.password_input) { return null; }
+                                            const submitters = Array.from(fields.form.elements).filter(input =>
+                                                input.form === fields.form && !input.disabled && input.type === 'submit' &&
+                                                ['BUTTON', 'INPUT'].includes(input.tagName));
+                                            if (submitters.length !== 1) { return null; }
+                                            const submitter = submitters[0];
+                                            const method = submitter.getAttribute('formmethod') ?? fields.form.getAttribute('method');
+                                            const target = submitter.getAttribute('formtarget') ?? fields.form.getAttribute('target');
+                                            if (method?.toLowerCase() !== 'post' || (target && target !== '_self')) { return null; }
+                                            try {
+                                                const action = new URL(submitter.getAttribute('formaction') ?? fields.form.getAttribute('action') ?? state.href, state.doc.baseURI);
+                                                return action.origin === location.origin && action.pathname === '/login.php' ? submitter : null;
+                                            } catch (_) { return null; }
+                                        }
+
+                                        function getSignedInUser() {
+                                            const userinfo = utils.getUserInfo();
+                                            return Number(userinfo?.jieqiUserId) > 0 ? userinfo : null;
+                                        }
+
+                                        function getLoginForm(state) {
+                                            const matches = [];
+                                            for (const form of state.doc.forms) {
+                                                if (form.getAttribute('method')?.toLowerCase() !== 'post') { continue; }
+                                                try {
+                                                    const action = new URL(form.getAttribute('action') || state.href, state.doc.baseURI);
+                                                    if (action.origin !== location.origin || action.pathname !== '/login.php') { continue; }
+                                                } catch (_) { continue; }
+                                                const accounts = form.querySelectorAll('input[name="username"]:is([type="text"], [type="email"], :not([type])):enabled:not([readonly])');
+                                                const passwords = form.querySelectorAll('input[name="password"][type="password"]:enabled:not([readonly])');
+                                                if (accounts.length === 1 && passwords.length === 1 &&
+                                                    accounts[0].form === form && passwords[0].form === form) {
+                                                    matches.push({ form, account_input: accounts[0], password_input: passwords[0] });
+                                                }
+                                            }
+                                            return matches.length === 1 ? matches[0] : null;
                                         }
 
                                         /**
