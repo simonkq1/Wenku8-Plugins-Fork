@@ -45,8 +45,8 @@
 // @grant              GM_addElement
 // @grant              GM_xmlhttpRequest
 // @grant              GM_setClipboard
-// @downloadURL https://raw.githubusercontent.com/simonkq1/Wenku8-Plugins-Fork/main/wenku8-plugin.js
-// @updateURL https://raw.githubusercontent.com/simonkq1/Wenku8-Plugins-Fork/main/wenku8-plugin.js
+// @downloadURL        https://raw.githubusercontent.com/simonkq1/Wenku8-Plugins-Fork/main/wenku8-plugin.js
+// @updateURL          https://raw.githubusercontent.com/simonkq1/Wenku8-Plugins-Fork/main/wenku8-plugin.js
 // ==/UserScript==
 
 /* eslint-disable no-multi-spaces */
@@ -21812,7 +21812,7 @@
                                                             const select = selects.length === 1 ? selects[0] : null;
                                                             if (select?.form === form && !select.matches(':disabled')) {
                                                                 const year_options = Array.from(select.options).filter(option =>
-                                                                    !option.matches(':disabled') && /^(?:一年|1\s*年)$/.test(option.label.trim()));
+                                                                    !option.matches(':disabled') && /^(?:保存\s*)?(?:一年|1\s*年)$/.test(option.label.trim()));
                                                                 if (year_options.length === 1) {
                                                                     expiry_defaulted = true;
                                                                     if (select.value !== year_options[0].value) {
