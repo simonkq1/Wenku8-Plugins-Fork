@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name               轻小说文库+
 // @namespace          https://greasyfork.org/users/667968-pyudng
-// @version            2.32.0
+// @version            2.32.1
 // @description        轻小说文库全方位体验改善，涵盖阅读、下载、书架、推荐、书评、账号、页面个性化等各种方面，你能想到的这里都有。没有？欢迎提出你的点子。
 // @author             PY-DNG / simonkq1(本分支)
 // @license            GPL-3.0-or-later
@@ -16,6 +16,7 @@
 // @require            https://update.greasyfork.org/scripts/549682/1681117/BBCode%20Parser.js
 // @require            https://fastly.jsdelivr.net/npm/sortablejs@1.15.6/Sortable.min.js
 // @require            https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js
+// @require            https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.2.0/crypto-js.min.js
 // @require            https://fastly.jsdelivr.net/npm/ejs@3.1.9/ejs.min.js
 // @require            https://fastly.jsdelivr.net/npm/jepub@2.1.4/dist/jepub.min.js
 // @require            https://fastly.jsdelivr.net/npm/canvas-confetti@1.9.3/dist/confetti.browser.min.js
@@ -54,7 +55,7 @@
 
 /* global W8P_CSS */
 /* global LogLevel DoLog Err Assert $ $All $CrE $AEL $$CrE addStyle detectDom destroyEvent copyProp copyProps parseArgs escJsStr replaceText getUrlArgv dl_browser dl_GM AsyncManager queueTask FunctionLoader loadFuncs require isLoaded default_pool */
-/* global $URL, Vue, Quasar, Sortable, confetti, JSZip, jEpub, jspdf, tippy */
+/* global $URL, Vue, Quasar, Sortable, confetti, JSZip, CryptoJS, jEpub, jspdf, tippy */
 
 /**
  * # 写给用户的开发指南
@@ -3843,10 +3844,21 @@
                 /**
                  * encode request data param for wenku8 api
                  * @param {string} str 
+                 * @param {boolean} [use_relay=true]
                  * @returns {string}
                  */
-                function encode(str) {
-                    return '&appver=1.13&request=' + btoa(str) + '&timetoken=' + (new Date().getTime());
+                function encode(str, use_relay = true) {
+                    const timetoken = Date.now();
+                    let appver = '1.13';
+                    if (use_relay) {
+                        // https://github.com/fateking27/wenku8-downloader/blob/main/src/app/appver.ts
+                        const version = '1.30';
+                        const flavor = 'digital-bento';
+                        const minutes = Math.floor(timetoken / 60000);
+                        const digest = CryptoJS.HmacSHA256(`${version}|${flavor}|${minutes}`, flavor).toString(CryptoJS.enc.Hex);
+                        appver = `${version}-${flavor}-${digest.slice(12, 20)}`;
+                    }
+                    return '&appver=' + appver + '&request=' + btoa(str) + '&timetoken=' + timetoken;
                 }
 
                 /**
@@ -3857,15 +3869,15 @@
                  */
                 async function _request({ url, use_relay = true }) {
                     const { promise, resolve, reject } = Promise.withResolvers();
-                    const api_endpoint = use_relay ? 'https://wenku8-relay.mewx.org' : 'http://app.wenku8.com/android.php';
+                    const api_endpoint = use_relay ? 'https://wenku8-relay.mewx.org/' : 'http://app.wenku8.com/android.php';
                     GM_xmlhttpRequest({
                         method: 'POST',
                         url: api_endpoint,
                         headers: {
                             'Content-Type': 'application/x-www-form-urlencoded',
-                            'User-Agent': 'Dalvik/2.1.0 (Linux; U; Android 7.1.2; unknown Build/NZH54D)'
+                            'User-Agent': use_relay ? 'okhttp/4.12.0' : 'Dalvik/2.1.0 (Linux; U; Android 7.1.2; unknown Build/NZH54D)'
                         },
-                        data: encode(url),
+                        data: encode(url, use_relay),
                         onload(response) {
                             if (response.status !== 200) {
                                 const err = new Error('Network error while fetching api');
@@ -3926,9 +3938,7 @@
                  * @returns {Promise<XMLDocument>}
                  */
                 async function getNovelShortInfo({ aid, lang }) {
-                    return requestXML({
-                        url: `action=book&do=info&aid=${aid}&t=${lang}`
-                    });
+                    return getNovelInfo({ aid, lang });
                 }
 
                 /**
@@ -6938,14 +6948,14 @@
                                                                 tr.innerHTML = `
                                                                     <td class="odd">${ volume_title }</td>
                                                                     <td class="even" align="center">
-                                                                        <a href="https://dl.wenku8.com/packtxt.php?aid=${ aid }&amp;vid=${ vid }&amp;charset=gbk" target="_blank">简体(G)</a> 
-                                                                        <a href="https://dl.wenku8.com/packtxt.php?aid=${ aid }&amp;vid=${ vid }&amp;charset=utf-8" target="_blank">简体(U)</a> 
-                                                                        <a href="https://dl.wenku8.com/packtxt.php?aid=${ aid }&amp;vid=${ vid }&amp;charset=big5" target="_blank">繁体(U)</a>
+                                                                        <a href="https://dl.wenku8.com/packtxt.php?aid=${ aid }&amp;vid=${ vid }&amp;type=gbk" target="_blank">简体(G)</a>
+                                                                        <a href="https://dl.wenku8.com/packtxt.php?aid=${ aid }&amp;vid=${ vid }&amp;type=utf-8" target="_blank">简体(U)</a>
+                                                                        <a href="https://dl.wenku8.com/packtxt.php?aid=${ aid }&amp;vid=${ vid }&amp;type=big5" target="_blank">繁体(U)</a>
                                                                     </td>
                                                                     <td class="even" align="center">
-                                                                        <a href="https://dl.wenku8.com/packtxt.php?aid=${ aid }&amp;vid=${ vid }&amp;aname=${ $URL.encode(book_title) }&amp;vname=${ $URL.encode(volume_title) }&amp;charset=gbk" target="_blank">简体(G)</a> 
-                                                                        <a href="https://dl.wenku8.com/packtxt.php?aid=${ aid }&amp;vid=${ vid }&amp;aname=${ $URL.encode(book_title) }&amp;vname=${ $URL.encode(volume_title) }&amp;charset=utf-8" target="_blank">简体(U)</a> 
-                                                                        <a href="https://dl.wenku8.com/packtxt.php?aid=${ aid }&amp;vid=${ vid }&amp;aname=${ $URL.encode(book_title) }&amp;vname=${ $URL.encode(volume_title) }&amp;charset=big5" target="_blank">繁体(U)</a>
+                                                                        <a href="https://dl.wenku8.com/packtxt.php?aid=${ aid }&amp;vid=${ vid }&amp;aname=${ $URL.encode(book_title) }&amp;vname=${ $URL.encode(volume_title) }&amp;type=gbk" target="_blank">简体(G)</a>
+                                                                        <a href="https://dl.wenku8.com/packtxt.php?aid=${ aid }&amp;vid=${ vid }&amp;aname=${ $URL.encode(book_title) }&amp;vname=${ $URL.encode(volume_title) }&amp;type=utf-8" target="_blank">简体(U)</a>
+                                                                        <a href="https://dl.wenku8.com/packtxt.php?aid=${ aid }&amp;vid=${ vid }&amp;aname=${ $URL.encode(book_title) }&amp;vname=${ $URL.encode(volume_title) }&amp;type=big5" target="_blank">繁体(U)</a>
                                                                     </td>
                                                                 `;
                                                                 tbody.append(tr);
