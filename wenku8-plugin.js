@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name               轻小说文库+
 // @namespace          https://greasyfork.org/users/667968-pyudng
-// @version            2.32.1
+// @version            2.32.2
 // @description        轻小说文库全方位体验改善，涵盖阅读、下载、书架、推荐、书评、账号、页面个性化等各种方面，你能想到的这里都有。没有？欢迎提出你的点子。
 // @author             PY-DNG / simonkq1(本分支)
 // @license            GPL-3.0-or-later
@@ -321,6 +321,8 @@
                 },
                 BookDetails: {
                     ShowDetails: '本书数据',
+                    LoadError: '本书数据加载失败',
+                    LoadErrorCaption: '请稍后再试',
                     DataNames: {
                         'DayHitsCount': '日点击量',
                         'TotalHitsCount': '总点击量',
@@ -1224,6 +1226,8 @@
                 },
                 BookDetails: {
                     ShowDetails: '本書數據',
+                    LoadError: '本書數據載入失敗',
+                    LoadErrorCaption: '請稍後再試',
                     DataNames: {
                         'DayHitsCount': '日點擊量',
                         'TotalHitsCount': '總點擊量',
@@ -3959,10 +3963,10 @@
                  * 获取书籍完整元信息
                  * @param {Object} detail 
                  * @param {number | string} detail.aid - 文库书籍ID
-                 * @param {number} detail.lang - 文库语言代码，请使用 {@link LanguageCode}
+                 * @param {number} [detail.lang] - 文库语言代码，默认使用当前页面语言，无法识别时使用简体
                  * @returns {Promise<XMLDocument>}
                  */
-                async function getNovelFullMeta({ aid, lang }) {
+                async function getNovelFullMeta({ aid, lang = utils.getLanguage() ?? CONST.Wenku8.LanguageCode.Simplified }) {
                     return requestXML({
                         url: `action=book&do=meta&aid=${aid}&t=${lang}`
                     });
@@ -12682,6 +12686,8 @@
                             const sidepanel = await require('sidepanel', true);
                             /** @type {api} */
                             const api = await require('api', true);
+                            /** @type {debugging} */
+                            const debugging = await require('debugging', true);
 
                             sidepanel.registerButton({
                                 id: 'bookpage.details.details',
@@ -12695,41 +12701,55 @@
                                         new URLSearchParams(location.search).get('id') ??
                                         location.href.match(/book\/(\d+)\.htm/)?.[1],
                                     10);
-                                    const doc = await api.getNovelFullMeta({ aid });
-                                    const title = $(doc, 'data[name="Title"]').firstChild.nodeValue;
-                                    const meta = [
-                                        'DayHitsCount',
-                                        'TotalHitsCount',
-                                        'PushCount',
-                                        'FavCount',
-                                    ].reduce((meta, key) => {
-                                        const name = BookDetails.DataNames[key];
-                                        const val = parseInt($(doc, `data[name=${ escJsStr(key) }]`).getAttribute('value'), 10);
-                                        meta[name] = val;
-                                        return meta;
-                                    }, {});
-                                    const message = Object.entries(meta).map(([name, val]) => `${name}: ${val}`).join('\n');
-                                    const html_message = `<div class="text-body1">${ message.replaceAll('\n', '<br>') }</div>`;
-                                    const dialog_title = replaceText(BookDetails.Dialog.Title, {
-                                        '{Name}': title,
-                                    });
+                                    try {
+                                        const doc = await api.getNovelFullMeta({ aid, lang: utils.getLanguage() });
+                                        Assert(doc?.nodeType === 9 && typeof doc.querySelector === 'function' && doc.documentElement?.localName === 'metadata', 'Invalid book metadata XML', Error);
+                                        const title = $(doc, 'data[name="Title"]')?.textContent.trim();
+                                        Assert(title, 'Missing book title', Error);
+                                        const meta = [
+                                            'DayHitsCount',
+                                            'TotalHitsCount',
+                                            'PushCount',
+                                            'FavCount',
+                                        ].reduce((meta, key) => {
+                                            const name = BookDetails.DataNames[key];
+                                            const raw = $(doc, `data[name=${ escJsStr(key) }]`)?.getAttribute('value')?.trim();
+                                            const val = Number(raw);
+                                            Assert(/^\d+$/.test(raw) && Number.isInteger(val), `Invalid book statistic: ${key}`, Error);
+                                            meta[name] = val;
+                                            return meta;
+                                        }, {});
+                                        const message = Object.entries(meta).map(([name, val]) => `${name}: ${val}`).join('\n');
+                                        const html_message = `<div class="text-body1">${ message.replaceAll('\n', '<br>') }</div>`;
+                                        const dialog_title = replaceText(BookDetails.Dialog.Title, {
+                                            '{Name}': title,
+                                        });
 
-                                    // Dialog输出
-                                    Quasar.Dialog.create({
-                                        title: dialog_title,
-                                        message: html_message,
-                                        html: true,
-                                        ok: {
-                                            label: BookDetails.Dialog.Ok,
-                                            color: 'primary',
-                                            flat: true,
-                                        },
-                                        cancel: {
-                                            label: BookDetails.Dialog.Cancel,
-                                            color: 'secondary',
-                                            flat: true,
-                                        },
-                                    }).onCancel(() => GM_setClipboard(`${ dialog_title }\n${ message }`));
+                                        // Dialog输出
+                                        Quasar.Dialog.create({
+                                            title: dialog_title,
+                                            message: html_message,
+                                            html: true,
+                                            ok: {
+                                                label: BookDetails.Dialog.Ok,
+                                                color: 'primary',
+                                                flat: true,
+                                            },
+                                            cancel: {
+                                                label: BookDetails.Dialog.Cancel,
+                                                color: 'secondary',
+                                                flat: true,
+                                            },
+                                        }).onCancel(() => GM_setClipboard(`${ dialog_title }\n${ message }`));
+                                    } catch (err) {
+                                        debugging.saveError({ type: 'book-details', error: err, info: { aid } });
+                                        Quasar.Notify.create({
+                                            type: 'error',
+                                            message: BookDetails.LoadError,
+                                            caption: BookDetails.LoadErrorCaption,
+                                            group: 'bookpage.details.load-error',
+                                        });
+                                    }
                                 }
                             });
                         }
