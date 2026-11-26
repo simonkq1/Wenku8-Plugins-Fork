@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name               轻小说文库+
 // @namespace          https://greasyfork.org/users/667968-pyudng
-// @version            2.32.2
+// @version            2.32.3
 // @description        轻小说文库全方位体验改善，涵盖阅读、下载、书架、推荐、书评、账号、页面个性化等各种方面，你能想到的这里都有。没有？欢迎提出你的点子。
 // @author             PY-DNG / simonkq1(本分支)
 // @license            GPL-3.0-or-later
@@ -215,7 +215,8 @@
                         ReplySendError: '无法确认评论是否已提交',
                         ReplySendErrorCaption: '请先查看书评页面，确认评论状态后再决定是否重新提交。',
                         ReplySendForbidden: '网站拒绝请求（HTTP 403）。请先查看书评页面，确认评论状态。',
-                        ReplySent: '已提交评论',
+                        ReplySent: '请求已完成，请确认评论是否已出现',
+                        ReplyChallenge: '网站要求安全验证。请先检查评论状态；仍需发送时，关闭「页面内发送评论」后使用原生按钮。',
                         SentStatusDetails: '查看详情',
                         DetailsOk: '已阅',
                     },
@@ -1080,7 +1081,8 @@
                         ReplySendError: '無法確認評論是否已提交',
                         ReplySendErrorCaption: '請先查看書評頁面，確認評論狀態後再決定是否重新提交。',
                         ReplySendForbidden: '網站拒絕請求（HTTP 403）。請先查看書評頁面，確認評論狀態。',
-                        ReplySent: '已提交評論',
+                        ReplySent: '請求已完成，請確認評論是否已出現',
+                        ReplyChallenge: '網站要求安全驗證。請先檢查評論狀態；仍需發送時，關閉「頁面內傳送評論」後使用原生按鈕。',
                         SentStatusDetails: '查看詳情',
                         DetailsOk: '已閱',
                     },
@@ -7486,6 +7488,62 @@
                 // 如果是发评论返回的提示页面，不继续运行
                 if ($All('.block').length === 1) { return; }
 
+                /**
+                 * 书评提交及楼层读取使用页面同源请求，不经过扩展后台
+                 * @param {{ url: string, method?: string, data?: string }} detail
+                 * @returns {Promise<Document>}
+                 */
+                async function requestReviewDocument({ url, method = 'GET', data }) {
+                    const target = new URL(url, utils.window.location.href);
+                    Assert(target.origin === utils.window.location.origin, 'Cross-origin review request', Error);
+                    const controller = new utils.window.AbortController();
+                    const timer = setTimeout(() => controller.abort(), 30000);
+                    try {
+                        const response = await utils.window.fetch(target.href, {
+                            method,
+                            mode: 'same-origin',
+                            credentials: 'same-origin',
+                            cache: 'no-store',
+                            signal: controller.signal,
+                            ...(data === undefined ? {} : {
+                                body: data,
+                                headers: { 'content-type': 'application/x-www-form-urlencoded' },
+                            }),
+                        });
+                        const source = new TextDecoder(document.characterSet).decode(await response.arrayBuffer());
+                        const doc = new DOMParser().parseFromString(source, 'text/html');
+                        const challenge = response.headers.get('cf-mitigated') === 'challenge'
+                            || (/just a moment/i.test(doc.title) && source.includes('_cf_chl_opt'));
+                        if (challenge || !response.ok) {
+                            const error = new Error(challenge ? 'Cloudflare challenge' : `HTTP ${response.status}`);
+                            error.name = 'HTTPError';
+                            error.status = response.status;
+                            error.challenge = challenge;
+                            throw error;
+                        }
+                        return doc;
+                    } catch (err) {
+                        const error = new Error(err?.name === 'AbortError' ? 'Review request timed out' : 'Review request failed');
+                        error.name = err?.name || 'Error';
+                        /** @type {debugging} */
+                        const debugging = require('debugging');
+                        debugging.saveError({
+                            type: 'review-request',
+                            error,
+                            info: {
+                                method,
+                                path: target.pathname,
+                                rid: /^\d+$/.test(target.searchParams.get('rid')) ? target.searchParams.get('rid') : null,
+                                status: err?.status,
+                                challenge: !!err?.challenge,
+                            },
+                        });
+                        throw err;
+                    } finally {
+                        clearTimeout(timer);
+                    }
+                }
+
                 // 注册设置组
                 configs.registerConfig('review', {
                     GM_addValueChangeListener,
@@ -8187,7 +8245,7 @@
                                             const { promise, resolve, reject } = Promise.withResolvers();
 
                                             try {
-                                                utils.requestDocument({
+                                                requestReviewDocument({
                                                     method: 'GET',
                                                     url: `/modules/article/reviewshow.php?rid=${rid}&page=${page ?? 1}`,
                                                 }).then(doc => {
@@ -8772,24 +8830,35 @@
                             /**
                              * 将评论编辑器的表单提交改为ajax请求，并在请求完成后更新页面楼层
                              * @param {HTMLFormElement} form 
-                             * @param {(form: HTMLFormElement) => any} onSend - 评论发送完成回调
+                             * @param {(form: HTMLFormElement) => any} onSend - 成功确认回调，目前结果未确认时不自动调用
                              * @param {boolean} to_last - 发送完毕更新页面楼层是否更新到最后一页，如果为否则更新到当前页
                              */
                             function hookSubmit(form, onSend, to_last=true) {
                                 let submit_ongoing = false;
-                                $AEL(form, 'submit', async e => {
-                                    if (!submit_ongoing && !GM_getValue('enabled')) { return; }
+                                $AEL(form.ownerDocument, 'submit', async e => {
+                                    if (e.target !== form) { return; }
+                                    if (submit_ongoing) { e.preventDefault(); return; }
+                                    if (e.defaultPrevented || !GM_getValue('enabled')) { return; }
 
-                                    // 拦截默认行为
+                                    // 原生表单验证及按钮点击事件已完成；无法辨识提交方式时保留原生操作
+                                    let submitter = e.submitter;
+                                    if (!submitter) {
+                                        const buttons = [...form.elements].filter(elm =>
+                                            !elm.matches(':disabled') && elm.matches('input[type="submit"], button[type="submit"], button:not([type])'));
+                                        if (buttons.length !== 1) { return; }
+                                        submitter = buttons[0];
+                                    }
+                                    if (submitter.form !== form || submitter.matches(':disabled')) { return; }
+                                    const url = new URL(submitter.hasAttribute('formaction') ? submitter.formAction : form.action, form.ownerDocument.baseURI);
+                                    const method = (submitter.hasAttribute('formmethod') ? submitter.formMethod : form.method).toUpperCase();
+                                    const enctype = submitter.hasAttribute('formenctype') ? submitter.formEnctype : form.enctype;
+                                    if (url.origin !== utils.window.location.origin || method !== 'POST' || enctype !== 'application/x-www-form-urlencoded') { return; }
+
                                     e.preventDefault();
-                                    if (submit_ongoing) { return; }
                                     const ReplyInPage = CONST.Text.Review.ReplyInPage;
-
-                                    // 表单数据
-                                    const formdata = new FormData(form);
-
-                                    // 不允许发送空数据
-                                    if (!formdata.get('pcontent').length) {
+                                    const formdata = new form.ownerDocument.defaultView.FormData(form, submitter);
+                                    const content = formdata.get('pcontent');
+                                    if (typeof content !== 'string' || !content.length) {
                                         Quasar.Notify.create({
                                             type: 'error',
                                             message: ReplyInPage.NoEmptyContent,
@@ -8797,96 +8866,54 @@
                                         });
                                         return;
                                     }
-
-                                    // 当评论长度小于7时填充空内容
-                                    if (formdata.get('pcontent').length < 7 && GM_getValue('fillblank')) {
-                                        formdata.set('pcontent', formdata.get('pcontent') + '[b][/b]');
+                                    if (content.length < 7 && GM_getValue('fillblank')) {
+                                        formdata.set('pcontent', content + '[b][/b]');
                                     }
 
-                                    // 发送评论
                                     submit_ongoing = true;
                                     Quasar.Loading.show({ message: ReplyInPage.SendingReply });
-                                    /** @type {Document} */
-                                    let doc;
                                     try {
-                                        const data = utils.serializeFormData(formdata);
-                                        doc = await utils.requestDocument({
+                                        const doc = await requestReviewDocument({
                                             method: 'POST',
-                                            url: form.getAttribute('action'),
-                                            data,
-                                            headers: {
-                                                'content-type': 'application/x-www-form-urlencoded'
-                                            }
+                                            url: url.href,
+                                            data: utils.serializeFormData(formdata),
                                         });
+                                        const details = $(doc, '.block')?.textContent.trim();
+                                        // 尚无可靠的成功回应范本，保留编辑内容及视窗，不自动调用 onSend
+                                        Quasar.Notify.create({
+                                            type: 'info',
+                                            message: ReplyInPage.ReplySent,
+                                            actions: details ? [{
+                                                label: ReplyInPage.SentStatusDetails,
+                                                handler() {
+                                                    Quasar.Dialog.create({
+                                                        message: details,
+                                                        html: false,
+                                                        ok: {
+                                                            label: ReplyInPage.DetailsOk,
+                                                            color: 'primary',
+                                                            flat: true,
+                                                        },
+                                                    });
+                                                }
+                                            }] : [],
+                                            group: 'review.replyinpage.reply-sent',
+                                        });
+
+                                        // 仅重新读取楼层以供核对；读取失败不重送评论
+                                        const page = to_last ? 'last' : new URLSearchParams(location.search).get('page') ?? 1;
+                                        await FloorManager.updater.update('loading', page, true, 'push').catch(() => {});
                                     } catch (err) {
                                         Quasar.Notify.create({
                                             type: 'error',
                                             message: ReplyInPage.ReplySendError,
-                                            caption: err?.status === 403 ? ReplyInPage.ReplySendForbidden : ReplyInPage.ReplySendErrorCaption,
+                                            caption: err?.challenge ? ReplyInPage.ReplyChallenge
+                                                : err?.status === 403 ? ReplyInPage.ReplySendForbidden : ReplyInPage.ReplySendErrorCaption,
                                         });
-                                        return;
                                     } finally {
                                         Quasar.Loading.hide();
                                         submit_ongoing = false;
                                     }
-
-                                    // 发送完成提示
-                                    const is_block = !!$(doc, '.block');
-                                    Quasar.Notify.create({
-                                        type: 'success',
-                                        message: ReplyInPage.ReplySent,
-                                        caption: is_block ? $(doc, '.blocktitle').innerText : undefined,
-                                        actions: is_block ? [{
-                                            label: ReplyInPage.SentStatusDetails,
-                                            async handler() {
-                                                // 使用文库返回的block作为详情弹窗内容
-                                                const block = $(doc, '.block').cloneNode(true);
-                                                block.classList.add('plus-preserve-border');
-                                                // 移除脚注
-                                                $(block, '.blocknote')?.remove();
-                                                // 点击任意<a>链接时，什么都不做（拦截默认行为与事件处理器）
-                                                [...$All(block, 'a')].forEach(a => 
-                                                    $AEL(a, 'click', e =>
-                                                        e.ctrlKey || e.metaKey || e.shiftKey || destroyEvent(e),
-                                                        { capture: true }
-                                                    )
-                                                );
-                                                // 点击返回时，关闭弹窗并重新聚焦到编辑器
-                                                [...$All(block, 'a[href="javascript:history.back(1)"]')].forEach(a =>
-                                                    $AEL(a, 'click', e => {
-                                                        dialog.hide();
-                                                        setTimeout(() => $(form, '#pcontent').focus());
-                                                    }, { capture: true })
-                                                );
-                                                // 点击关闭此窗口时，关闭弹窗
-                                                [...$All(block, 'a[href="javascript:window.close()"]')].forEach(a =>
-                                                    $AEL(a, 'click', e => {
-                                                        dialog.hide();
-                                                    }, { capture: true })
-                                                );
-                                                
-                                                // Quasar Dialog 展示详情
-                                                const dialog = Quasar.Dialog.create({
-                                                    message: '<div id="plus-reply-detail"></div>',
-                                                    html: true,
-                                                    ok: {
-                                                        label: ReplyInPage.DetailsOk,
-                                                        color: 'primary',
-                                                        flat: true,
-                                                    },
-                                                });
-                                                (await detectDom('#plus-reply-detail')).append(block);
-                                            }
-                                        }] : [],
-                                        group: 'review.replyinpage.reply-sent',
-                                    });
-
-                                    // 回调
-                                    onSend && onSend(form);
-
-                                    // 更新页面楼层
-                                    const page = to_last ? 'last' : new URLSearchParams(location.search).get('page') ?? 1;
-                                    await FloorManager.updater.update('loading', page, true, 'push').catch(() => {});
                                 });
                             }
 
